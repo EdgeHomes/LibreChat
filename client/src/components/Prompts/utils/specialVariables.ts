@@ -1,4 +1,4 @@
-import { Calendar, User, Clock, Globe, Sparkles } from 'lucide-react';
+import { Calendar, User, Clock, Globe, Sparkles, UserCog, Captions } from 'lucide-react';
 import type { specialVariables } from 'librechat-data-provider';
 
 type SpecialVariableKey = keyof typeof specialVariables;
@@ -11,6 +11,8 @@ export const specialVariableIcons: Record<
   current_datetime: Clock,
   current_user: User,
   iso_datetime: Globe,
+  user_department: UserCog,
+  user_job_title: Captions,
 };
 
 export const getSpecialVariableIcon = (name: string) =>
