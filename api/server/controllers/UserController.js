@@ -45,6 +45,8 @@ const PUBLIC_USER_RESPONSE_FIELDS = [
   'createdAt',
   'updatedAt',
   'tenantId',
+  'department',
+  'jobTitle',
 ];
 
 const sanitizeUserForResponse = (user) => {

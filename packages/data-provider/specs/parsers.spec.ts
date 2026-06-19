@@ -47,6 +47,8 @@ jest.mock('dayjs', () => {
 describe('replaceSpecialVars', () => {
   // Create a partial user object for testing
   const mockUser = {
+    jobTitle: 'Test Job Title',
+    department: 'Test Department',
     name: 'Test User',
     id: 'user123',
   } as TUser;
@@ -158,6 +160,8 @@ describe('replaceSpecialVars', () => {
     expect(result).toContain('2024-04-29 12:34:56 -04:00 (Monday)'); // current_datetime
     expect(result).toContain('2024-04-29T16:34:56.000Z'); // iso_datetime
     expect(result).toContain('Test User'); // current_user
+    expect(result).toContain('Test Department'); // user_department
+    expect(result).toContain('Test Job Title'); // user_job_title
   });
 });
 
