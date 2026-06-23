@@ -96,6 +96,7 @@ src/style - official.css
 .idx
 monospace.json
 .idea
+.ai
 *.iml
 *.pem
 config.local.ts
