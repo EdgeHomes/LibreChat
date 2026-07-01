@@ -29,9 +29,68 @@ describe('getLLMConfig', () => {
 
     expect(result.llmConfig.clientOptions).toHaveProperty('fetchOptions');
     expect(result.llmConfig.clientOptions?.fetchOptions).toHaveProperty('dispatcher');
-    expect(result.llmConfig.clientOptions?.fetchOptions?.dispatcher).toBeDefined();
-    expect(result.llmConfig.clientOptions?.fetchOptions?.dispatcher.constructor.name).toBe(
-      'ProxyAgent',
+    const dispatcher = result.llmConfig.clientOptions?.fetchOptions?.dispatcher;
+    expect(dispatcher).toBeDefined();
+    expect(dispatcher?.constructor.name).toBe('ProxyAgent');
+  });
+
+  it('should harden user-provided reverse proxy URLs with a connect-time dispatcher and disabled redirects', () => {
+    const result = getLLMConfig('test-api-key', {
+      modelOptions: {},
+      reverseProxyUrl: 'https://user-provider.example.com',
+      baseURLIsUserProvided: true,
+      allowedAddresses: ['10.0.0.5:443'],
+    });
+
+    const fetchOptions = result.llmConfig.clientOptions?.fetchOptions as
+      | { dispatcher?: unknown; redirect?: string }
+      | undefined;
+    expect(fetchOptions).toEqual(
+      expect.objectContaining({
+        dispatcher: expect.any(Object),
+        redirect: 'error',
+      }),
+    );
+  });
+
+  it('should keep the SSRF-safe dispatcher when a proxy is configured for a user-provided URL', () => {
+    const result = getLLMConfig('test-api-key', {
+      modelOptions: {},
+      proxy: 'http://proxy:8080',
+      reverseProxyUrl: 'https://user-provider.example.com',
+      baseURLIsUserProvided: true,
+    });
+
+    const fetchOptions = result.llmConfig.clientOptions?.fetchOptions as
+      | { dispatcher?: { constructor: { name: string } }; redirect?: string }
+      | undefined;
+    expect(fetchOptions?.dispatcher?.constructor.name).toBe('Agent');
+    expect(fetchOptions).toEqual(expect.objectContaining({ redirect: 'error' }));
+  });
+
+  it('should keep SSRF fetch options when clientOptions are dropped for a user-provided URL', () => {
+    const result = getLLMConfig('test-api-key', {
+      modelOptions: {},
+      reverseProxyUrl: 'https://user-provider.example.com',
+      baseURLIsUserProvided: true,
+      dropParams: ['clientOptions'],
+    });
+
+    const clientOptions = result.llmConfig.clientOptions as
+      | {
+          baseURL?: string;
+          defaultHeaders?: Record<string, string>;
+          fetchOptions?: { dispatcher?: unknown; redirect?: string };
+        }
+      | undefined;
+    expect(result.llmConfig.anthropicApiUrl).toBe('https://user-provider.example.com');
+    expect(clientOptions?.baseURL).toBeUndefined();
+    expect(clientOptions?.defaultHeaders).toBeUndefined();
+    expect(clientOptions?.fetchOptions).toEqual(
+      expect.objectContaining({
+        dispatcher: expect.any(Object),
+        redirect: 'error',
+      }),
     );
   });
 
@@ -333,10 +392,9 @@ describe('getLLMConfig', () => {
 
       expect(result.llmConfig.clientOptions).toHaveProperty('fetchOptions');
       expect(result.llmConfig.clientOptions?.fetchOptions).toHaveProperty('dispatcher');
-      expect(result.llmConfig.clientOptions?.fetchOptions?.dispatcher).toBeDefined();
-      expect(result.llmConfig.clientOptions?.fetchOptions?.dispatcher.constructor.name).toBe(
-        'ProxyAgent',
-      );
+      const dispatcher = result.llmConfig.clientOptions?.fetchOptions?.dispatcher;
+      expect(dispatcher).toBeDefined();
+      expect(dispatcher?.constructor.name).toBe('ProxyAgent');
       expect(result.llmConfig.clientOptions).toHaveProperty('baseURL', 'https://reverse-proxy.com');
       expect(result.llmConfig).toHaveProperty('anthropicApiUrl', 'https://reverse-proxy.com');
     });
@@ -534,9 +592,8 @@ describe('getLLMConfig', () => {
           },
         });
         expect(result.llmConfig.clientOptions?.fetchOptions).toHaveProperty('dispatcher');
-        expect(result.llmConfig.clientOptions?.fetchOptions?.dispatcher.constructor.name).toBe(
-          'ProxyAgent',
-        );
+        const dispatcher = result.llmConfig.clientOptions?.fetchOptions?.dispatcher;
+        expect(dispatcher?.constructor.name).toBe('ProxyAgent');
       });
 
       it('should handle Anthropic with reverse proxy like initialize.js', () => {
@@ -1158,6 +1215,64 @@ describe('getLLMConfig', () => {
         expect(result.llmConfig).not.toHaveProperty('topK');
       });
 
+      it('should request summarized thinking display for Sonnet 5 (opt back in)', () => {
+        const result = getLLMConfig('test-key', {
+          modelOptions: { model: 'claude-sonnet-5', thinking: true },
+        });
+
+        const thinking = result.llmConfig.thinking as unknown as {
+          type: string;
+          display?: string;
+        };
+        expect(thinking.type).toBe('adaptive');
+        expect(thinking.display).toBe('summarized');
+      });
+
+      it('should send explicit disabled thinking for Sonnet 5 when thinking is off', () => {
+        const result = getLLMConfig('test-key', {
+          modelOptions: { model: 'claude-sonnet-5', thinking: false },
+        });
+
+        expect((result.llmConfig.thinking as unknown as { type: string }).type).toBe('disabled');
+      });
+
+      it('should keep Sonnet 5 thinking off when a disabled config round-trips from persistence', () => {
+        const result = getLLMConfig('test-key', {
+          modelOptions: {
+            model: 'claude-sonnet-5',
+            // Persisted model_parameters round-trip the prior disabled object,
+            // not a boolean — it must stay disabled, not flip back to adaptive.
+            thinking: { type: 'disabled' } as unknown as boolean,
+          },
+        });
+
+        expect((result.llmConfig.thinking as unknown as { type: string }).type).toBe('disabled');
+      });
+
+      it('should omit sampling parameters for Sonnet 5', () => {
+        const result = getLLMConfig('test-key', {
+          modelOptions: {
+            model: 'claude-sonnet-5',
+            thinking: true,
+            temperature: 0.7,
+            topP: 0.9,
+            topK: 40,
+          },
+        });
+
+        expect(result.llmConfig).not.toHaveProperty('temperature');
+        expect(result.llmConfig).not.toHaveProperty('topP');
+        expect(result.llmConfig).not.toHaveProperty('topK');
+      });
+
+      it('should NOT send explicit disabled thinking for pre-5 Sonnet (omission is off)', () => {
+        const result = getLLMConfig('test-key', {
+          modelOptions: { model: 'claude-sonnet-4-6', thinking: false },
+        });
+
+        expect(result.llmConfig.thinking).toBeUndefined();
+      });
+
       it('should NOT set thinking.display for pre-Opus-4.7 adaptive models', () => {
         const pre47Models = ['claude-opus-4-6', 'claude-sonnet-4-6'];
 
@@ -1351,7 +1466,7 @@ describe('getLLMConfig', () => {
         });
       });
 
-      it('should future-proof Claude 5.x Sonnet models with 64K default', () => {
+      it('should default Claude 5.x Sonnet models to 128K (matches Anthropic spec)', () => {
         const testCases = [
           'claude-sonnet-5',
           'claude-sonnet-5-0',
@@ -1363,7 +1478,7 @@ describe('getLLMConfig', () => {
           const result = getLLMConfig('test-key', {
             modelOptions: { model },
           });
-          expect(result.llmConfig.maxTokens).toBe(64000);
+          expect(result.llmConfig.maxTokens).toBe(128000);
         });
       });
 
@@ -1401,20 +1516,20 @@ describe('getLLMConfig', () => {
 
       it('should future-proof Claude 6-9.x models with correct defaults', () => {
         const testCases = [
-          // Claude 6.x - Sonnet/Haiku get 64K, Opus gets 128K
-          { model: 'claude-sonnet-6', expected: 64000 },
+          // Claude 6.x - Sonnet/Opus get 128K, Haiku gets 64K
+          { model: 'claude-sonnet-6', expected: 128000 },
           { model: 'claude-haiku-6-0', expected: 64000 },
           { model: 'claude-opus-6-1', expected: 128000 },
           // Claude 7.x
-          { model: 'claude-sonnet-7-20270101', expected: 64000 },
+          { model: 'claude-sonnet-7-20270101', expected: 128000 },
           { model: 'claude-haiku-7.5', expected: 64000 },
           { model: 'claude-opus-7', expected: 128000 },
           // Claude 8.x
-          { model: 'claude-sonnet-8', expected: 64000 },
+          { model: 'claude-sonnet-8', expected: 128000 },
           { model: 'claude-haiku-8-2', expected: 64000 },
           { model: 'claude-opus-8-latest', expected: 128000 },
           // Claude 9.x
-          { model: 'claude-sonnet-9', expected: 64000 },
+          { model: 'claude-sonnet-9', expected: 128000 },
           { model: 'claude-haiku-9', expected: 64000 },
           { model: 'claude-opus-9', expected: 128000 },
         ];
