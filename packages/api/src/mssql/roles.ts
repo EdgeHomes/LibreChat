@@ -3,6 +3,7 @@ import { sapphireDbConfig } from './config';
 import { getSapphirePool } from './pool';
 
 /** Bracket-quoted schema from config (a trusted identifier, not user input). */
+const database = `[${sapphireDbConfig.database}]`;
 const schema = `[${sapphireDbConfig.schema}]`;
 
 /**
@@ -13,40 +14,56 @@ const schema = `[${sapphireDbConfig.schema}]`;
  * (BSSUserRoleGrp -> RoleGrpAssmts); both queries below union those two paths.
  * `@roleId` matches the stable `Roles.RoleID` code. Matching is case-insensitive
  * because the database collation is CI_AS.
+ * ${database} is used even though it's not necessary to future-proof in case we
+ * eventually need to use another database.  It can be the case where we need to
+ * join multiple databases.
  */
 const HAS_ROLE_QUERY = `
 SELECT TOP 1 1 AS hasRole
-FROM ${schema}.UserLogins ul
-JOIN ${schema}.BSSUsers u ON u.BSSUserRID = ul.BSSUserRID
+FROM ${database}.${schema}.UserLogins ul
+JOIN ${database}.${schema}.BSSUsers u ON u.BSSUserRID = ul.BSSUserRID
 WHERE ul.ExternalID = @externalId
+  AND ul.Type = 'Office 365'
   AND u.Status = 'Active'
   AND EXISTS (
     SELECT 1
-    FROM ${schema}.UserAssmts ua
-    JOIN ${schema}.Roles r ON r.RoleRID = ua.RoleRID
-    WHERE ua.BSSUserRID = u.BSSUserRID AND r.RoleID = @roleId
+    FROM ${database}.${schema}.UserAssmts ua
+    JOIN ${database}.${schema}.Roles r ON r.RoleRID = ua.RoleRID
+    WHERE ua.BSSUserRID = u.BSSUserRID
+      AND ua.Status in ('New', 'Open')
+      AND r.Status in ('New', 'Open', 'Active')
+      AND r.RoleID = @roleId
     UNION ALL
     SELECT 1
-    FROM ${schema}.BSSUserRoleGrp urg
-    JOIN ${schema}.RoleGrpAssmts rga ON rga.RoleGrpRID = urg.RoleGrpRID
-    JOIN ${schema}.Roles r2 ON r2.RoleRID = rga.RoleRID
-    WHERE urg.BSSUserRID = u.BSSUserRID AND r2.RoleID = @roleId
+    FROM ${database}.${schema}.BSSUserRoleGrp urg
+    JOIN ${database}.${schema}.RoleGrpAssmts rga ON rga.RoleGrpRID = urg.RoleGrpRID
+    JOIN ${database}.${schema}.Roles r2 ON r2.RoleRID = rga.RoleRID
+    WHERE urg.BSSUserRID = u.BSSUserRID
+      AND urg.Status in ('New', 'Open')
+      AND rga.Status in ('New', 'Open')
+      AND r2.Status in ('New', 'Open', 'Active')
+      AND r2.RoleID = @roleId
   );`;
 
 const USER_ROLES_QUERY = `
 SELECT DISTINCT r.RoleID, r.Name
-FROM ${schema}.UserLogins ul
-JOIN ${schema}.BSSUsers u ON u.BSSUserRID = ul.BSSUserRID
+FROM ${database}.${schema}.UserLogins ul
+JOIN ${database}.${schema}.BSSUsers u ON u.BSSUserRID = ul.BSSUserRID
 JOIN (
     SELECT ua.BSSUserRID, ua.RoleRID
-    FROM ${schema}.UserAssmts ua
+    FROM ${database}.${schema}.UserAssmts ua
+    WHERE ua.Status in ('New', 'Open')
     UNION
     SELECT urg.BSSUserRID, rga.RoleRID
-    FROM ${schema}.BSSUserRoleGrp urg
-    JOIN ${schema}.RoleGrpAssmts rga ON rga.RoleGrpRID = urg.RoleGrpRID
+    FROM ${database}.${schema}.BSSUserRoleGrp urg
+    JOIN ${database}.${schema}.RoleGrpAssmts rga ON rga.RoleGrpRID = urg.RoleGrpRID
+    WHERE urg.Status in ('New', 'Open')
+      AND rga.Status in ('New', 'Open')
 ) ur ON ur.BSSUserRID = u.BSSUserRID
-JOIN ${schema}.Roles r ON r.RoleRID = ur.RoleRID
+JOIN ${database}.${schema}.Roles r ON r.RoleRID = ur.RoleRID
 WHERE ul.ExternalID = @externalId
+  AND ul.Type = 'Office 365'
+  AND r.Status in ('New', 'Open', 'Active')
   AND u.Status = 'Active'
   AND r.RoleID IS NOT NULL
 ORDER BY r.RoleID;`;

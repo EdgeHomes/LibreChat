@@ -32,6 +32,9 @@ jest.mock('@librechat/api', () => ({
   GenerationJobManager: jest.fn(),
   resolveJsonSchemaRefs: jest.fn((schema) => schema),
   buildOAuthToolCallName: jest.fn((name) => name),
+  resolveUserMCPRoleIds: jest.fn(async () => new Set()),
+  filterMCPServersByRoles: jest.fn((servers) => servers),
+  userCanAccessMCPServer: jest.fn(async () => true),
 }));
 
 jest.mock('~/cache', () => ({ getLogStores: jest.fn() }));

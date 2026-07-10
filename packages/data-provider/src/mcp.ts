@@ -177,6 +177,11 @@ const BaseOptionsSchema = z.object({
   /** Controls visibility in chat dropdown menu (MCPSelect) */
   chatMenu: z.boolean().optional(),
   /**
+   * Optional RBAC gate. CSV of Sapphire RoleIDs; a user must hold at least one of
+   * them to access this server. Omitted => available to all users.
+   */
+  roles: z.string().optional(),
+  /**
    * Controls server instruction behavior:
    * - undefined/not set: No instructions included (default)
    * - true: Use server-provided instructions
@@ -385,6 +390,7 @@ const omitServerManagedFields = <T extends z.ZodObject<z.ZodRawShape>>(schema: T
     sseReadTimeout: true,
     initTimeout: true,
     chatMenu: true,
+    roles: true,
     serverInstructions: true,
     requiresOAuth: true,
     customUserVars: true,
