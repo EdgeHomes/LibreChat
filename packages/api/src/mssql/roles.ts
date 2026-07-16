@@ -19,54 +19,58 @@ const schema = `[${sapphireDbConfig.schema}]`;
  * join multiple databases.
  */
 const HAS_ROLE_QUERY = `
-SELECT TOP 1 1 AS hasRole
-FROM ${database}.${schema}.UserLogins ul
-JOIN ${database}.${schema}.BSSUsers u ON u.BSSUserRID = ul.BSSUserRID
-WHERE ul.ExternalID = @externalId
-  AND ul.Type = 'Office 365'
-  AND u.Status = 'Active'
-  AND EXISTS (
-    SELECT 1
-    FROM ${database}.${schema}.UserAssmts ua
-    JOIN ${database}.${schema}.Roles r ON r.RoleRID = ua.RoleRID
-    WHERE ua.BSSUserRID = u.BSSUserRID
-      AND ua.Status in ('New', 'Open')
-      AND r.Status in ('New', 'Open', 'Active')
-      AND r.RoleID = @roleId
-    UNION ALL
-    SELECT 1
-    FROM ${database}.${schema}.BSSUserRoleGrp urg
-    JOIN ${database}.${schema}.RoleGrpAssmts rga ON rga.RoleGrpRID = urg.RoleGrpRID
-    JOIN ${database}.${schema}.Roles r2 ON r2.RoleRID = rga.RoleRID
-    WHERE urg.BSSUserRID = u.BSSUserRID
-      AND urg.Status in ('New', 'Open')
-      AND rga.Status in ('New', 'Open')
-      AND r2.Status in ('New', 'Open', 'Active')
-      AND r2.RoleID = @roleId
-  );`;
+select top 1 1 as [hasRole]
+from [${database}].[${schema}].[Roles]
+join [${database}].[${schema}].[UserAssmts] on [UserAssmts].[RoleRID] = [Roles].[RoleRID]
+  and [UserAssmts].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [UserAssmts].[BSSUserRID]
+  and [UserLogins].[Type] IN ('Office 365', 'SBOpenID', 'SBOpenID2')
+  and [UserLogins].[Status] in ('New')
+  and [UserLogins].[ExternalID] = @externalId
+where [Roles].[Status] in ('New', 'Open', 'Active')
+  and [Roles].[RoleID] = @roleId
+union
+select top 1 1 as [hasRole]
+from [${database}].[${schema}].[Roles]
+join [${database}].[${schema}].[RoleGrpAssmts] on [RoleGrpAssmts].[RoleRID] = [Roles].[RoleRID]
+  and [RoleGrpAssmts].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[RoleGrps] on [RoleGrps].[RoleGrpRID] = [RoleGrpAssmts].[RoleGrpRID]
+  and [RoleGrps].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[BSSUserRoleGrp] on [RoleGrpAssmts].[RoleGrpRID] = [BSSUserRoleGrp].[RoleGrpRID]
+  and [BSSUserRoleGrp].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [BSSUserRoleGrp].[BSSUserRID]
+  and [UserLogins].[Type] in ('Office 365', 'SBOpenID', 'SBOpenID2')
+  and [UserLogins].[Status] in ('New')
+  and [UserLogins].[ExternalID] = @externalId
+where [Roles].[Status] in ('New', 'Open', 'Active')
+  and [Roles].[RoleID] = @roleId;
+`;
 
 const USER_ROLES_QUERY = `
-SELECT DISTINCT r.RoleID, r.Name
-FROM ${database}.${schema}.UserLogins ul
-JOIN ${database}.${schema}.BSSUsers u ON u.BSSUserRID = ul.BSSUserRID
-JOIN (
-    SELECT ua.BSSUserRID, ua.RoleRID
-    FROM ${database}.${schema}.UserAssmts ua
-    WHERE ua.Status in ('New', 'Open')
-    UNION
-    SELECT urg.BSSUserRID, rga.RoleRID
-    FROM ${database}.${schema}.BSSUserRoleGrp urg
-    JOIN ${database}.${schema}.RoleGrpAssmts rga ON rga.RoleGrpRID = urg.RoleGrpRID
-    WHERE urg.Status in ('New', 'Open')
-      AND rga.Status in ('New', 'Open')
-) ur ON ur.BSSUserRID = u.BSSUserRID
-JOIN ${database}.${schema}.Roles r ON r.RoleRID = ur.RoleRID
-WHERE ul.ExternalID = @externalId
-  AND ul.Type = 'Office 365'
-  AND r.Status in ('New', 'Open', 'Active')
-  AND u.Status = 'Active'
-  AND r.RoleID IS NOT NULL
-ORDER BY r.RoleID;`;
+select [Roles].[RoleID], [Roles].[Name]
+from [${database}].[${schema}].[Roles]
+join [${database}].[${schema}].[UserAssmts] on [UserAssmts].[RoleRID] = [Roles].[RoleRID]
+  and [UserAssmts].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [UserAssmts].[BSSUserRID]
+  and [UserLogins].[Type] in ('Office 365', 'SBOpenID', 'SBOpenID2')
+  and [UserLogins].[Status] in ('New')
+  and [UserLogins].[ExternalID] = @externalId
+where [Roles].[Status] in ('New', 'Open', 'Active')
+union
+select [Roles].[RoleID], [Roles].[Name]
+from [${database}].[${schema}].[Roles]
+join [${database}].[${schema}].[RoleGrpAssmts] on [RoleGrpAssmts].[RoleRID] = [Roles].[RoleRID]
+  and [RoleGrpAssmts].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[RoleGrps] on [RoleGrps].[RoleGrpRID] = [RoleGrpAssmts].[RoleGrpRID]
+  and [RoleGrps].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[BSSUserRoleGrp] on [RoleGrpAssmts].[RoleGrpRID] = [BSSUserRoleGrp].[RoleGrpRID]
+  and [BSSUserRoleGrp].[Status] in ('New', 'Open')
+join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [BSSUserRoleGrp].[BSSUserRID]
+  and [UserLogins].[Type] in ('Office 365', 'SBOpenID', 'SBOpenID2')
+  and [UserLogins].[Status] in ('New')
+  and [UserLogins].[ExternalID] = @externalId
+where [Roles].[Status] in ('New', 'Open', 'Active');
+`;
 
 /** A role assigned to a user: the stable code and its display name. */
 export interface SapphireRole {
