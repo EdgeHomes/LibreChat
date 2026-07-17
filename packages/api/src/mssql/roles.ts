@@ -20,10 +20,10 @@ const schema = `[${sapphireDbConfig.schema}]`;
  */
 const HAS_ROLE_QUERY = `
 select top 1 1 as [hasRole]
-from [${database}].[${schema}].[Roles]
-join [${database}].[${schema}].[UserAssmts] on [UserAssmts].[RoleRID] = [Roles].[RoleRID]
+from ${database}.${schema}.[Roles]
+join ${database}.${schema}.[UserAssmts] on [UserAssmts].[RoleRID] = [Roles].[RoleRID]
   and [UserAssmts].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [UserAssmts].[BSSUserRID]
+join ${database}.${schema}.[UserLogins] on [UserLogins].[BSSUserRID] = [UserAssmts].[BSSUserRID]
   and [UserLogins].[Type] IN ('Office 365', 'SBOpenID', 'SBOpenID2')
   and [UserLogins].[Status] in ('New')
   and [UserLogins].[ExternalID] = @externalId
@@ -31,14 +31,14 @@ where [Roles].[Status] in ('New', 'Open', 'Active')
   and [Roles].[RoleID] = @roleId
 union
 select top 1 1 as [hasRole]
-from [${database}].[${schema}].[Roles]
-join [${database}].[${schema}].[RoleGrpAssmts] on [RoleGrpAssmts].[RoleRID] = [Roles].[RoleRID]
+from ${database}.${schema}.[Roles]
+join ${database}.${schema}.[RoleGrpAssmts] on [RoleGrpAssmts].[RoleRID] = [Roles].[RoleRID]
   and [RoleGrpAssmts].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[RoleGrps] on [RoleGrps].[RoleGrpRID] = [RoleGrpAssmts].[RoleGrpRID]
+join ${database}.${schema}.[RoleGrps] on [RoleGrps].[RoleGrpRID] = [RoleGrpAssmts].[RoleGrpRID]
   and [RoleGrps].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[BSSUserRoleGrp] on [RoleGrpAssmts].[RoleGrpRID] = [BSSUserRoleGrp].[RoleGrpRID]
+join ${database}.${schema}.[BSSUserRoleGrp] on [RoleGrpAssmts].[RoleGrpRID] = [BSSUserRoleGrp].[RoleGrpRID]
   and [BSSUserRoleGrp].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [BSSUserRoleGrp].[BSSUserRID]
+join ${database}.${schema}.[UserLogins] on [UserLogins].[BSSUserRID] = [BSSUserRoleGrp].[BSSUserRID]
   and [UserLogins].[Type] in ('Office 365', 'SBOpenID', 'SBOpenID2')
   and [UserLogins].[Status] in ('New')
   and [UserLogins].[ExternalID] = @externalId
@@ -48,24 +48,24 @@ where [Roles].[Status] in ('New', 'Open', 'Active')
 
 const USER_ROLES_QUERY = `
 select [Roles].[RoleID], [Roles].[Name]
-from [${database}].[${schema}].[Roles]
-join [${database}].[${schema}].[UserAssmts] on [UserAssmts].[RoleRID] = [Roles].[RoleRID]
+from ${database}.${schema}.[Roles]
+join ${database}.${schema}.[UserAssmts] on [UserAssmts].[RoleRID] = [Roles].[RoleRID]
   and [UserAssmts].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [UserAssmts].[BSSUserRID]
+join ${database}.${schema}.[UserLogins] on [UserLogins].[BSSUserRID] = [UserAssmts].[BSSUserRID]
   and [UserLogins].[Type] in ('Office 365', 'SBOpenID', 'SBOpenID2')
   and [UserLogins].[Status] in ('New')
   and [UserLogins].[ExternalID] = @externalId
 where [Roles].[Status] in ('New', 'Open', 'Active')
 union
 select [Roles].[RoleID], [Roles].[Name]
-from [${database}].[${schema}].[Roles]
-join [${database}].[${schema}].[RoleGrpAssmts] on [RoleGrpAssmts].[RoleRID] = [Roles].[RoleRID]
+from ${database}.${schema}.[Roles]
+join ${database}.${schema}.[RoleGrpAssmts] on [RoleGrpAssmts].[RoleRID] = [Roles].[RoleRID]
   and [RoleGrpAssmts].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[RoleGrps] on [RoleGrps].[RoleGrpRID] = [RoleGrpAssmts].[RoleGrpRID]
+join ${database}.${schema}.[RoleGrps] on [RoleGrps].[RoleGrpRID] = [RoleGrpAssmts].[RoleGrpRID]
   and [RoleGrps].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[BSSUserRoleGrp] on [RoleGrpAssmts].[RoleGrpRID] = [BSSUserRoleGrp].[RoleGrpRID]
+join ${database}.${schema}.[BSSUserRoleGrp] on [RoleGrpAssmts].[RoleGrpRID] = [BSSUserRoleGrp].[RoleGrpRID]
   and [BSSUserRoleGrp].[Status] in ('New', 'Open')
-join [${database}].[${schema}].[UserLogins] on [UserLogins].[BSSUserRID] = [BSSUserRoleGrp].[BSSUserRID]
+join ${database}.${schema}.[UserLogins] on [UserLogins].[BSSUserRID] = [BSSUserRoleGrp].[BSSUserRID]
   and [UserLogins].[Type] in ('Office 365', 'SBOpenID', 'SBOpenID2')
   and [UserLogins].[Status] in ('New')
   and [UserLogins].[ExternalID] = @externalId

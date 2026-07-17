@@ -151,7 +151,10 @@ const UserOAuthOptionsSchema = OAuthOptionsBaseSchema.omit({
 
 const OboOptionsSchema = z.object({
   /** Scopes to request for the downstream MCP server (e.g., "api://<client-id>/Mcp.Tools.ReadWrite") */
-  scopes: z.string().min(1),
+  scopes: z
+    .string()
+    .transform((val) => extractEnvVariable(val))
+    .pipe(z.string().min(1)),
 });
 
 const BaseOptionsSchema = z.object({
