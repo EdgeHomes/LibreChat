@@ -726,6 +726,7 @@ describe('MCP_USER_INPUT_FIELDS', () => {
     expect(MCP_USER_INPUT_FIELDS.has('startup')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('timeout')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('chatMenu')).toBe(false);
+    expect(MCP_USER_INPUT_FIELDS.has('roles')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('requiresOAuth')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('customUserVars')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('oauth_headers')).toBe(false);

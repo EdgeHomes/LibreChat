@@ -691,7 +691,7 @@ async function processOpenIDAuth(tokenset, existingUsersOnly = false) {
       email: email || '',
       emailVerified: userinfo.email_verified || false,
       name: fullName,
-      idOnTheSource: userinfo.oid,
+      idOnTheSource: claims.oid || userinfo.oid,
       openidIssuer,
       department: userinfo.department || undefined,
       jobTitle: (userinfo.jobTitle ?? userinfo.job_title) || undefined,
@@ -707,7 +707,7 @@ async function processOpenIDAuth(tokenset, existingUsersOnly = false) {
     }
     user.username = username;
     user.name = fullName;
-    user.idOnTheSource = userinfo.oid;
+    user.idOnTheSource = claims.oid || userinfo.oid;
     if (email && email !== user.email) {
       user.email = email;
       user.emailVerified = userinfo.email_verified || false;

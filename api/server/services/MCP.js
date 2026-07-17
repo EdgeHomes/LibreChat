@@ -21,6 +21,9 @@ const {
   checkAccessWithRequestCache,
   requiresEphemeralUserConnection,
   containsGraphTokenPlaceholder,
+  resolveUserMCPRoleIds,
+  filterMCPServersByRoles,
+  userCanAccessMCPServer,
 } = require('@librechat/api');
 const {
   Time,
@@ -162,11 +165,12 @@ async function resolveAllMcpConfigs(userId, user) {
       error,
     );
   }
-  if (user?.role) {
-    return await registry.getAllServerConfigs(userId, configServers, user.role);
-  }
+  const configs = user?.role
+    ? await registry.getAllServerConfigs(userId, configServers, user.role)
+    : await registry.getAllServerConfigs(userId, configServers);
 
-  return await registry.getAllServerConfigs(userId, configServers);
+  const userRoleIds = await resolveUserMCPRoleIds(user);
+  return filterMCPServersByRoles(configs, userRoleIds);
 }
 
 function getServerCustomUserVars(userMCPAuthMap, serverName) {
@@ -783,6 +787,9 @@ function createToolInstance({
       if (!canUseMCP) {
         throw new Error('Forbidden: Insufficient MCP server permissions');
       }
+      if (!(await userCanAccessMCPServer(capturedServerConfig, effectiveUser))) {
+        throw new Error('Forbidden: Insufficient MCP server role');
+      }
       const flowsCache = getLogStores(CacheKeys.FLOWS);
       const flowManager = getFlowStateManager(flowsCache);
       derivedSignal = config?.signal ? AbortSignal.any([config.signal]) : undefined;
@@ -905,18 +912,20 @@ function createToolInstance({
  * Get MCP setup data including config, connections, and OAuth servers.
  * Resolves config-source servers from admin Config overrides when tenant context is available.
  * @param {string} userId - The user ID
- * @param {{ role?: string, tenantId?: string }} [options] - Optional role/tenant context
+ * @param {{ role?: string, tenantId?: string, idOnTheSource?: string }} [options] - Optional role/tenant/RBAC context
  * @returns {Object} Object containing mcpConfig, appConnections, userConnections, and oauthServers
  */
 async function getMCPSetupData(userId, options = {}) {
   const registry = getMCPServersRegistry();
-  const { role, tenantId } = options;
+  const { role, tenantId, idOnTheSource } = options;
 
   const appConfig = await getAppConfig({ role, tenantId, userId });
   const configServers = await registry.ensureConfigServers(appConfig?.mcpConfig || {});
-  const mcpConfig = role
+  const allConfigs = role
     ? await registry.getAllServerConfigs(userId, configServers, role)
     : await registry.getAllServerConfigs(userId, configServers);
+  const userRoleIds = await resolveUserMCPRoleIds({ idOnTheSource });
+  const mcpConfig = filterMCPServersByRoles(allConfigs, userRoleIds);
   const mcpManager = getMCPManager(userId);
   /** @type {Map<string, import('@librechat/api').MCPConnection>} */
   let appConnections = new Map();

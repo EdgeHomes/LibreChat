@@ -151,7 +151,10 @@ const UserOAuthOptionsSchema = OAuthOptionsBaseSchema.omit({
 
 const OboOptionsSchema = z.object({
   /** Scopes to request for the downstream MCP server (e.g., "api://<client-id>/Mcp.Tools.ReadWrite") */
-  scopes: z.string().min(1),
+  scopes: z
+    .string()
+    .transform((val) => extractEnvVariable(val))
+    .pipe(z.string().min(1)),
 });
 
 const BaseOptionsSchema = z.object({
@@ -176,6 +179,11 @@ const BaseOptionsSchema = z.object({
   initTimeout: z.number().int().nonnegative().optional(),
   /** Controls visibility in chat dropdown menu (MCPSelect) */
   chatMenu: z.boolean().optional(),
+  /**
+   * Optional RBAC gate. CSV of Sapphire RoleIDs; a user must hold at least one of
+   * them to access this server. Omitted => available to all users.
+   */
+  roles: z.string().optional(),
   /**
    * Controls server instruction behavior:
    * - undefined/not set: No instructions included (default)
@@ -385,6 +393,7 @@ const omitServerManagedFields = <T extends z.ZodObject<z.ZodRawShape>>(schema: T
     sseReadTimeout: true,
     initTimeout: true,
     chatMenu: true,
+    roles: true,
     serverInstructions: true,
     requiresOAuth: true,
     customUserVars: true,
