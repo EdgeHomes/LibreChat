@@ -440,6 +440,11 @@ export function processMCPEnv(params: {
     newObj.oauth = processedOAuth;
   }
 
+  // Process OBO (on-behalf-of) config if it exists; admin-only, so resolve ${ENV} in scopes.
+  if ('obo' in newObj && newObj.obo && typeof newObj.obo.scopes === 'string') {
+    newObj.obo.scopes = processAdminValue(newObj.obo.scopes, dbSourced);
+  }
+
   return newObj;
 }
 
