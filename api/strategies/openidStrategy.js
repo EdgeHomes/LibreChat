@@ -78,6 +78,21 @@ async function customFetch(url, options) {
       logger.debug(`[openidStrategy] Response headers: ${logHeaders(response.headers)}`);
     }
 
+    // Surface the IdP error body (carries the AADSTS diagnostic code) on failed
+    // token requests, gated behind DEBUG_OPENID_REQUESTS. Clone so openid-client
+    // can still read the original body. Error responses contain error/error_description,
+    // never tokens.
+    if (!response.ok && debugOpenId) {
+      try {
+        const errorBody = await response.clone().text();
+        logger.error(
+          `[openidStrategy] Token request to ${urlStr} failed (${response.status}): ${errorBody}`,
+        );
+      } catch (readError) {
+        logger.error('[openidStrategy] Failed to read error response body:', readError);
+      }
+    }
+
     if (response.status === 200 && response.headers.has('www-authenticate')) {
       const wwwAuth = response.headers.get('www-authenticate');
       logger.warn(`[openidStrategy] Non-standard WWW-Authenticate header found in successful response (200 OK): ${wwwAuth}.
@@ -459,6 +474,59 @@ async function resolveGroupsFromOverage(accessToken, sub) {
 }
 
 /**
+ * Fetch the signed-in user's jobTitle and department from Microsoft Graph.
+ *
+ * These were previously emitted as mapped token claims, which forced an
+ * application-specific token signing key (AADSTS50146). Reading them from Graph
+ * `/me` at login keeps the token free of mapped claims. The app-audience access
+ * token is first exchanged (OBO) for a Graph-scoped (User.Read) token, reusing
+ * the same cached exchange as group-overage resolution.
+ *
+ * Degrades gracefully: returns null on any failure so login is never blocked.
+ *
+ * @param {string} accessToken - Access token from the OpenID tokenset (app audience)
+ * @param {string} sub - Subject identifier for OBO cache keying
+ * @returns {Promise<{ jobTitle?: string, department?: string } | null>}
+ */
+async function fetchUserProfileFromGraph(accessToken, sub) {
+  try {
+    if (!accessToken) {
+      logger.error('[openidStrategy] Access token missing; cannot fetch Graph user profile');
+      return null;
+    }
+
+    const graphToken = await exchangeTokenForOverage(accessToken, sub);
+    const url = 'https://graph.microsoft.com/v1.0/me?$select=jobTitle,department';
+
+    const fetchOptions = {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${graphToken}` },
+    };
+    const dispatcher = getOpenIdProxyDispatcher();
+    if (dispatcher) {
+      fetchOptions.dispatcher = dispatcher;
+    }
+
+    const response = await undici.fetch(url, fetchOptions);
+    if (!response.ok) {
+      logger.error(
+        `[openidStrategy] Failed to fetch user profile from Microsoft Graph /me: HTTP ${response.status} ${response.statusText}`,
+      );
+      return null;
+    }
+
+    const data = await response.json();
+    return {
+      jobTitle: typeof data?.jobTitle === 'string' ? data.jobTitle : undefined,
+      department: typeof data?.department === 'string' ? data.department : undefined,
+    };
+  } catch (err) {
+    logger.error('[openidStrategy] Error fetching user profile from Microsoft Graph /me:', err);
+    return null;
+  }
+}
+
+/**
  * Resolve the source object (decoded token or userinfo) for a role check
  * based on the configured token kind. Throws on invalid configuration so
  * misconfiguration surfaces loudly instead of silently denying every login.
@@ -574,6 +642,14 @@ async function processOpenIDAuth(tokenset, existingUsersOnly = false) {
   if (tokenset.access_token) {
     const providerUserinfo = await getUserInfo(openidConfig, tokenset.access_token, claims.sub);
     Object.assign(userinfo, providerUserinfo);
+
+    // jobTitle/department are no longer emitted as mapped token claims (avoids the
+    // app-specific signing-key requirement); read them from Graph /me instead.
+    const profile = await fetchUserProfileFromGraph(tokenset.access_token, claims.sub);
+    if (profile) {
+      userinfo.jobTitle = profile.jobTitle ?? userinfo.jobTitle;
+      userinfo.department = profile.department ?? userinfo.department;
+    }
   }
 
   const email = getOpenIdEmail(userinfo);

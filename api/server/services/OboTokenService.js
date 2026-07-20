@@ -59,6 +59,22 @@ function tagOboExchangeError(error, retryable) {
   return error;
 }
 
+/**
+ * Logs the OAuth error body from a failed OBO exchange. For Entra/Azure AD the
+ * `AADSTS…` diagnostic code is carried in `error_description`; openid-client
+ * surfaces it as `error`/`error_description` (falling back to `cause`/`message`).
+ */
+function logOboExchangeError(error) {
+  const description =
+    error?.error_description ?? error?.cause?.error_description ?? error?.message ?? 'n/a';
+  logger.error(
+    `[OboTokenService] OBO exchange rejected by IdP` +
+      ` | status: ${getErrorStatus(error) ?? 'n/a'}` +
+      ` | error: ${error?.error ?? error?.cause?.error ?? getErrorCode(error) ?? 'n/a'}` +
+      ` | description: ${description}`,
+  );
+}
+
 async function delay(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -77,6 +93,7 @@ async function performOboExchange({ user, accessToken, scopes, config, tokensCac
   } catch (error) {
     const retryable = isRetryableOboExchangeError(error);
     if (!retryable) {
+      logOboExchangeError(error);
       throw tagOboExchangeError(error, false);
     }
 
@@ -89,6 +106,7 @@ async function performOboExchange({ user, accessToken, scopes, config, tokensCac
     try {
       grantResponse = await requestGrant();
     } catch (retryError) {
+      logOboExchangeError(retryError);
       throw tagOboExchangeError(retryError, isRetryableOboExchangeError(retryError));
     }
   }
