@@ -1,5 +1,4 @@
 import type { ParsedServerConfig } from './types';
-import { getUserRoles } from '~/mssql';
 import {
   parseServerRoleIds,
   canAccessMCPServer,
@@ -8,6 +7,7 @@ import {
   resolveUserMCPRoleIds,
   userCanAccessMCPServer,
 } from './access';
+import { getUserRoles } from '~/mssql';
 
 /** getUserRoles reaches the external Sapphire MSSQL DB — mock that boundary only. */
 jest.mock('~/mssql', () => ({ getUserRoles: jest.fn() }));
