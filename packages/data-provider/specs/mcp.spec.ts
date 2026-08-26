@@ -6,6 +6,48 @@ import {
   MCP_USER_INPUT_FIELDS,
 } from '../src/mcp';
 
+describe('MCP server title validation', () => {
+  const titleCases = [
+    ['hyphenated ASCII title', 'Read-Only Tools'],
+    ['accented title', "Générateur d'images"],
+    ['Unicode title', '画像ツール'],
+    ['typographic apostrophe', 'Today’s Tools'],
+  ];
+
+  it.each(titleCases)('accepts a %s in configured MCP servers', (_label, title) => {
+    const result = MCPOptionsSchema.safeParse({
+      type: 'sse',
+      url: 'https://mcp-server.com/sse',
+      title,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it.each(titleCases)('accepts a %s from the MCP Builder', (_label, title) => {
+    const result = MCPServerUserInputSchema.safeParse({
+      type: 'sse',
+      url: 'https://mcp-server.com/sse',
+      title,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it.each(['', '   ', '-Tools', "'Tools", 'Tools@Home'])(
+    'rejects an invalid MCP server title: %p',
+    (title) => {
+      const result = MCPServerUserInputSchema.safeParse({
+        type: 'sse',
+        url: 'https://mcp-server.com/sse',
+        title,
+      });
+
+      expect(result.success).toBe(false);
+    },
+  );
+});
+
 describe('MCPOptionsSchema', () => {
   describe('OBO transport support', () => {
     it('should accept obo on SSE transport', () => {
@@ -70,6 +112,35 @@ describe('MCP schemas', () => {
       });
       expect(userResult.success).toBe(false);
       delete process.env.FAKE_SECRET;
+    });
+
+    it('should resolve obo scopes through the admin schema (attack vector baseline)', () => {
+      process.env.FAKE_SECRET = 'leaked-secret-value';
+      const adminResult = SSEOptionsSchema.safeParse({
+        type: 'sse',
+        url: 'https://mcp-server.com/sse',
+        obo: { scopes: '${FAKE_SECRET}' },
+      });
+      expect(adminResult.success).toBe(true);
+      if (adminResult.success) {
+        expect(adminResult.data.obo?.scopes).toBe('leaked-secret-value');
+      }
+      delete process.env.FAKE_SECRET;
+    });
+
+    it('should reject env var references in obo scopes through user input schema', () => {
+      process.env.FAKE_SECRET = 'leaked-secret-value';
+      const userResult = MCPServerUserInputSchema.safeParse({
+        type: 'sse',
+        url: 'https://mcp-server.com/sse',
+        obo: { scopes: '${FAKE_SECRET}' },
+      });
+      expect(userResult.success).toBe(false);
+      delete process.env.FAKE_SECRET;
+    });
+
+    it('should keep obo in the user-input field set so the OBO lockdown still covers it', () => {
+      expect(MCP_USER_INPUT_FIELDS.has('obo')).toBe(true);
     });
   });
 

