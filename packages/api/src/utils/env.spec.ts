@@ -421,6 +421,7 @@ describe('resolveHeaders', () => {
       googleId: 'gid',
       facebookId: 'fbid',
       openidId: 'oid',
+      idOnTheSource: 'src-oid',
       samlId: 'sid',
       ldapId: 'lid',
       githubId: 'ghid',
@@ -441,6 +442,7 @@ describe('resolveHeaders', () => {
       'X-User-GoogleId': '{{LIBRECHAT_USER_GOOGLEID}}',
       'X-User-FacebookId': '{{LIBRECHAT_USER_FACEBOOKID}}',
       'X-User-OpenIdId': '{{LIBRECHAT_USER_OPENIDID}}',
+      'X-User-IdOnTheSource': '{{LIBRECHAT_USER_IDONTHESOURCE}}',
       'X-User-SamlId': '{{LIBRECHAT_USER_SAMLID}}',
       'X-User-LdapId': '{{LIBRECHAT_USER_LDAPID}}',
       'X-User-GithubId': '{{LIBRECHAT_USER_GITHUBID}}',
@@ -462,6 +464,7 @@ describe('resolveHeaders', () => {
     expect(result['X-User-GoogleId']).toBe('gid');
     expect(result['X-User-FacebookId']).toBe('fbid');
     expect(result['X-User-OpenIdId']).toBe('oid');
+    expect(result['X-User-IdOnTheSource']).toBe('src-oid');
     expect(result['X-User-SamlId']).toBe('sid');
     expect(result['X-User-LdapId']).toBe('lid');
     expect(result['X-User-GithubId']).toBe('ghid');

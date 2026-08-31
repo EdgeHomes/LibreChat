@@ -40,6 +40,7 @@ const ALLOWED_USER_FIELDS = [
   'googleId',
   'facebookId',
   'openidId',
+  'idOnTheSource',
   'samlId',
   'ldapId',
   'githubId',
