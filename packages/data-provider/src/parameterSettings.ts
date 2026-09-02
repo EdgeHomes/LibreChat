@@ -6,6 +6,7 @@ import {
   EModelEndpoint,
   openAISettings,
   googleSettings,
+  getGoogleThinkingBudgetBounds,
   Providers,
   ReasoningEffort,
   AnthropicEffort,
@@ -70,24 +71,6 @@ const baseDefinitions: Record<string, SettingDefinition> = {
     minTags: 0,
     maxTags: 4,
   },
-  imageDetail: {
-    key: 'imageDetail',
-    label: 'com_endpoint_plug_image_detail',
-    labelCode: true,
-    description: 'com_endpoint_openai_detail',
-    descriptionCode: true,
-    type: 'enum',
-    default: ImageDetail.auto,
-    component: 'slider',
-    options: [ImageDetail.low, ImageDetail.auto, ImageDetail.high],
-    enumMappings: {
-      [ImageDetail.low]: 'com_ui_low',
-      [ImageDetail.auto]: 'com_ui_auto',
-      [ImageDetail.high]: 'com_ui_high',
-    },
-    optionType: 'conversation',
-    columnSpan: 2,
-  },
 };
 
 const createDefinition = (
@@ -146,6 +129,26 @@ export const librechat = {
     placeholderCode: true,
     optionType: 'model',
   } as const,
+  /** Controls how LibreChat encodes image content blocks, not a provider request
+   * parameter — so it belongs to this group and is stripped from model options. */
+  imageDetail: {
+    key: 'imageDetail',
+    label: 'com_endpoint_plug_image_detail',
+    labelCode: true,
+    description: 'com_endpoint_openai_detail',
+    descriptionCode: true,
+    type: 'enum',
+    default: ImageDetail.auto,
+    component: 'slider',
+    options: [ImageDetail.low, ImageDetail.auto, ImageDetail.high],
+    enumMappings: {
+      [ImageDetail.low]: 'com_ui_low',
+      [ImageDetail.auto]: 'com_ui_auto',
+      [ImageDetail.high]: 'com_ui_high',
+    },
+    optionType: 'conversation',
+    columnSpan: 2,
+  } as SettingDefinition,
   fileTokenLimit: {
     key: 'fileTokenLimit',
     label: 'com_ui_file_token_limit',
@@ -690,6 +693,16 @@ const meta: Record<string, SettingDefinition> = {
 };
 
 const google: Record<string, SettingDefinition> = {
+  /** Bounds the hand-rolled editor enforced through InputNumber, and they stay
+   *  scoped to this endpoint: the shared definition is rendered by every other
+   *  endpoint, whose own context windows may fall outside them. */
+  maxContextTokens: createDefinition(librechat.maxContextTokens, {
+    range: {
+      min: googleSettings.maxContextTokens.min,
+      max: googleSettings.maxContextTokens.max,
+      step: googleSettings.maxContextTokens.step,
+    },
+  }),
   temperature: createDefinition(baseDefinitions.temperature, {
     default: googleSettings.temperature.default,
     range: {
@@ -830,7 +843,7 @@ const google: Record<string, SettingDefinition> = {
 const googleConfig: SettingsConfiguration = [
   librechat.modelLabel,
   librechat.promptPrefix,
-  librechat.maxContextTokens,
+  google.maxContextTokens,
   google.maxOutputTokens,
   google.temperature,
   google.topP,
@@ -851,7 +864,7 @@ const googleCol1: SettingsConfiguration = [
 ];
 
 const googleCol2: SettingsConfiguration = [
-  librechat.maxContextTokens,
+  google.maxContextTokens,
   google.maxOutputTokens,
   google.temperature,
   google.topP,
@@ -876,7 +889,7 @@ const openAI: SettingsConfiguration = [
   openAIParams.presence_penalty,
   baseDefinitions.stop,
   librechat.resendFiles,
-  baseDefinitions.imageDetail,
+  librechat.imageDetail,
   openAIParams.web_search,
   openAIParams.reasoning_effort,
   openAIParams.useResponsesApi,
@@ -909,7 +922,7 @@ const openAICol2: SettingsConfiguration = [
   openAIParams.presence_penalty,
   baseDefinitions.stop,
   librechat.resendFiles,
-  baseDefinitions.imageDetail,
+  librechat.imageDetail,
   openAIParams.reasoning_effort,
   openAIParams.reasoning_summary,
   openAIParams.reasoning_mode,
@@ -1264,14 +1277,32 @@ export function applyModelAwareDefaults(
   if (!model) {
     return settings;
   }
-
   const modelAwareSettings =
     endpoint === EModelEndpoint.google
-      ? settings.map((setting) =>
-          setting.key === 'maxOutputTokens'
-            ? { ...setting, default: googleSettings.maxOutputTokens.reset(model) }
-            : setting,
-        )
+      ? settings.map((setting) => {
+          if (setting.key === 'maxOutputTokens') {
+            return { ...setting, default: googleSettings.maxOutputTokens.reset(model) };
+          }
+          /** The shared thinking budget range is model-agnostic, so it caps Pro below
+           *  its real ceiling and accepts Flash values the provider rejects. The
+           *  maximum and the positive floor move together. `range.min` stays -1 so
+           *  the "decide automatically" sentinel remains typeable. */
+          if (setting.key === 'thinkingBudget' && setting.range != null) {
+            const bounds = getGoogleThinkingBudgetBounds(model);
+            if (bounds != null) {
+              return {
+                ...setting,
+                range: {
+                  ...setting.range,
+                  max: bounds.max,
+                  positiveMin: bounds.min,
+                  modelSpecific: true,
+                },
+              };
+            }
+          }
+          return setting;
+        })
       : settings;
 
   if (endpoint !== EModelEndpoint.anthropic || supportsPromptCache(model)) {

@@ -181,7 +181,14 @@ const BaseOptionsSchema = z.object({
   /** Timeout (ms) for the long-lived SSE GET stream body before undici aborts it. Default: 300_000 (5 min). */
   sseReadTimeout: z.number().int().positive().optional(),
   initTimeout: z.number().int().nonnegative().optional(),
-  /** Controls visibility in chat dropdown menu (MCPSelect) */
+  /**
+   * Whether the server is offered in chat.
+   *
+   * `false` hides it from the chat dropdown (MCPSelect) AND bars it from the
+   * chat selection a request carries, so a stale or hand-written request cannot
+   * reach it either. It does not restrict agents, nor a server a model spec
+   * pins through `mcpServers` — both are the operator's own choice.
+   */
   chatMenu: z.boolean().optional(),
   /**
    * Optional RBAC gate. CSV of Sapphire RoleIDs; a user must hold at least one of
