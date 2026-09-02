@@ -78,6 +78,29 @@ export function mergeHeaders(
   return merged;
 }
 
+/**
+ * Builds the outbound end-user attribution header for provider calls made outside
+ * the endpoint config pipeline (image tools), where `endpoints.custom[].headers`
+ * and `resolveConfigHeaders` never run. Gateways that key per-user spend off a
+ * configured header see the same identity on those calls as on chat traffic.
+ *
+ * `undefined` when either side is missing — matching `mergeHeaders`' convention so
+ * the two compose — so an unconfigured deployment or a user without the identifier
+ * sends no header at all, rather than an empty value a gateway could pool distinct
+ * users under.
+ */
+export function userAttributionHeaders(
+  headerName?: string | null,
+  userId?: string | null,
+): Record<string, string> | undefined {
+  const name = headerName?.trim();
+  const value = userId?.trim();
+  if (!name || !value) {
+    return undefined;
+  }
+  return { [name]: value };
+}
+
 type DefaultHeadersContainer = { defaultHeaders?: Record<string, string> };
 
 /**

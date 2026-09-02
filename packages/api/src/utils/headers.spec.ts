@@ -1,5 +1,10 @@
 import type { RunLLMConfig } from '~/types';
-import { mediaTypeEssence, mergeHeaders, resolveConfigHeaders } from './headers';
+import {
+  mergeHeaders,
+  mediaTypeEssence,
+  resolveConfigHeaders,
+  userAttributionHeaders,
+} from './headers';
 
 describe('mediaTypeEssence', () => {
   it('returns the bare type for a header with no parameters', () => {
@@ -77,6 +82,38 @@ describe('mergeHeaders', () => {
       { 'Anthropic-Beta': 'managed-beta' },
     );
     expect(merged).toEqual({ 'Anthropic-Beta': 'custom-beta,managed-beta' });
+  });
+});
+
+describe('userAttributionHeaders', () => {
+  it('maps the configured header name to the identifier', () => {
+    expect(userAttributionHeaders('X-Edge-Entra-OID', 'oid-123')).toEqual({
+      'X-Edge-Entra-OID': 'oid-123',
+    });
+  });
+
+  it('is undefined when the header name is unconfigured', () => {
+    expect(userAttributionHeaders(undefined, 'oid-123')).toBeUndefined();
+    expect(userAttributionHeaders('', 'oid-123')).toBeUndefined();
+    expect(userAttributionHeaders('   ', 'oid-123')).toBeUndefined();
+  });
+
+  it('is undefined when the user has no identifier, rather than sending a blank value', () => {
+    expect(userAttributionHeaders('X-Edge-Entra-OID', undefined)).toBeUndefined();
+    expect(userAttributionHeaders('X-Edge-Entra-OID', null)).toBeUndefined();
+    expect(userAttributionHeaders('X-Edge-Entra-OID', '')).toBeUndefined();
+    expect(userAttributionHeaders('X-Edge-Entra-OID', '  ')).toBeUndefined();
+  });
+
+  it('composes with mergeHeaders, leaving a config untouched when unconfigured', () => {
+    expect(mergeHeaders(undefined, userAttributionHeaders(undefined, 'oid-123'))).toBeUndefined();
+  });
+
+  it('merges beneath provider-managed headers', () => {
+    const merged = mergeHeaders(userAttributionHeaders('X-Edge-Entra-OID', 'oid-123'), {
+      'api-key': 'azure-key',
+    });
+    expect(merged).toEqual({ 'X-Edge-Entra-OID': 'oid-123', 'api-key': 'azure-key' });
   });
 });
 

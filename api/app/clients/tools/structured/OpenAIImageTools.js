@@ -8,9 +8,11 @@ const { ContentTypes, EImageOutputType } = require('librechat-data-provider');
 const {
   logAxiosError,
   oaiToolkit,
+  mergeHeaders,
   extractBaseURL,
   getProxyDispatcher,
   applyAxiosProxyConfig,
+  userAttributionHeaders,
 } = require('@librechat/api');
 const { getStrategyFunctions } = require('~/server/services/Files/strategies');
 const { getFiles } = require('~/models');
@@ -106,6 +108,19 @@ function createOpenAIImageTools(fields = {}) {
     closureConfig.apiKey = process.env.IMAGE_GEN_OAI_API_KEY;
   }
 
+  /** Mirrors the chat path's identity pairing: the configured header carries the
+   * upstream account id for gateway spend attribution, `user` carries the
+   * LibreChat id as the fallback for users without one. */
+  const attributionHeaders = userAttributionHeaders(
+    process.env.IMAGE_GEN_OAI_USER_HEADER,
+    req?.user?.idOnTheSource,
+  );
+  const attributionUser = req?.user?.id;
+  const defaultHeaders = mergeHeaders(closureConfig.defaultHeaders, attributionHeaders);
+  if (defaultHeaders) {
+    closureConfig.defaultHeaders = defaultHeaders;
+  }
+
   const imageFiles = fields.imageFiles ?? [];
 
   /**
@@ -174,6 +189,7 @@ function createOpenAIImageTools(fields = {}) {
                 : undefined,
             quality,
             size,
+            user: attributionUser,
           },
           {
             signal: derivedSignal,
@@ -252,6 +268,9 @@ Error Message: ${error.message}`);
       // formData.append('n', n.toString());
       formData.append('quality', quality);
       formData.append('size', size);
+      if (attributionUser) {
+        formData.append('user', attributionUser);
+      }
 
       /** @type {Record<FileSources, undefined | NodeStreamDownloader<File>>} */
       const streamMethods = {};
@@ -325,6 +344,7 @@ Error Message: ${error.message}`);
       /** @type {import('axios').RawAxiosHeaders} */
       let headers = {
         ...formData.getHeaders(),
+        ...attributionHeaders,
       };
 
       if (process.env.IMAGE_GEN_OAI_AZURE_API_VERSION && process.env.IMAGE_GEN_OAI_BASEURL) {
