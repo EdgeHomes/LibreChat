@@ -1,6 +1,13 @@
+import winston from 'winston';
+import { Writable } from 'node:stream';
+import { logger } from '@librechat/data-schemas';
+import type { CodeExecutionContext } from './execution';
 import {
+  assertCodeExecutionApprovalBinding,
+  captureCodeExecutionApprovalBinding,
   codeExecutionAuthHeaders,
   codeExecutionHeaders,
+  getCodeWorkspaceSelections,
   resolveCodeExecutionContext,
 } from './execution';
 
@@ -306,6 +313,32 @@ describe('resolveCodeExecutionContext', () => {
     expect(context.baseUrl).toBe('https://bridge.example/v1');
   });
 
+  it('uses the stateful deployment when configured environments have no default', () => {
+    process.env.LIBRECHAT_CODE_BASEURL_STATEFUL = 'http://code-stateful.test/v1';
+    const context = resolveCodeExecutionContext({
+      statefulSessions: true,
+      environments: [
+        {
+          id: 'personal-vm',
+          name: 'Personal VM',
+          type: 'attached',
+          baseURL: 'https://bridge.example/v1',
+          owner: 'principal',
+          workerId: 'personal-worker',
+        },
+      ],
+      userId: 'user-1',
+    });
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        baseUrl: 'http://code-stateful.test/v1',
+        environmentId: undefined,
+        runtimeSessionHint: 'v2:user:b5729fb0e3ca12e7a61ff6857b99d98e',
+      }),
+    );
+  });
+
   it('fails closed when an agent references an unknown configured environment', () => {
     expect(() =>
       resolveCodeExecutionContext({
@@ -315,5 +348,284 @@ describe('resolveCodeExecutionContext', () => {
         userId: 'user-1',
       }),
     ).toThrow('Stateful code environment "missing-vm" is not configured');
+  });
+});
+
+describe('stateful code approval target binding', () => {
+  const context = (overrides: Partial<CodeExecutionContext> = {}): CodeExecutionContext => ({
+    baseUrl: 'https://bridge.example/v1',
+    codeSessionKey: 'execute_code:stateful:route-a:session-a',
+    executionProfile: 'stateful' as const,
+    executionRouteKey: 'stateful:route-a',
+    runtimeSessionHint: 'v3:environment-a:agent-user:session-a',
+    statefulSessions: true,
+    environmentId: 'environment-a',
+    environmentType: 'attached' as const,
+    bridgeWorkerId: 'worker-a',
+    codeWorkspace: {
+      environmentId: 'environment-a',
+      workspaceId: 'project-a',
+      operations: ['read_file', 'execute_command'],
+    },
+    ...overrides,
+  });
+
+  it('ignores operation ordering but binds actual permission changes', () => {
+    const original = context();
+    const binding = (ctx: CodeExecutionContext) =>
+      captureCodeExecutionApprovalBinding([{ id: 'a', codeExecutionContext: ctx }]);
+    expect(
+      binding(
+        context({
+          codeWorkspace: {
+            ...original.codeWorkspace!,
+            operations: ['execute_command', 'read_file'],
+          },
+        }),
+      ),
+    ).toEqual(binding(original));
+    expect(
+      binding(
+        context({ codeWorkspace: { ...original.codeWorkspace!, operations: ['read_file'] } }),
+      ),
+    ).not.toEqual(binding(original));
+  });
+
+  it('captures only opaque, canonical identities for stateful targets', () => {
+    const binding = captureCodeExecutionApprovalBinding([
+      {
+        id: 'agent-z',
+        codeExecutionContext: context({ bridgeWorkerId: 'worker-z' }),
+      },
+      {
+        id: 'agent-a',
+        codeExecutionContext: context(),
+      },
+      {
+        id: 'stateless',
+        codeExecutionContext: {
+          baseUrl: 'https://default.example/v1',
+          codeSessionKey: 'execute_code',
+          executionProfile: 'default',
+          statefulSessions: false,
+        },
+      },
+    ]);
+
+    expect(binding).toEqual({
+      version: 1,
+      targets: [
+        { agentId: 'agent-a', targetHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        { agentId: 'agent-z', targetHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      ],
+    });
+    const serialized = JSON.stringify(binding);
+    expect(serialized).not.toContain('bridge.example');
+    expect(serialized).not.toContain('worker-a');
+    expect(serialized).not.toContain('session-a');
+  });
+
+  it('accepts the same targets regardless of traversal order', () => {
+    const first = { id: 'agent-a', codeExecutionContext: context() };
+    const second = {
+      id: 'agent-b',
+      codeExecutionContext: context({ bridgeWorkerId: 'worker-b' }),
+    };
+    const binding = captureCodeExecutionApprovalBinding([first, second]);
+
+    expect(() => assertCodeExecutionApprovalBinding(binding, [second, first])).not.toThrow();
+  });
+
+  it('deduplicates snapshots and orders targets independently of replica locale', () => {
+    const laterByCodeUnit = {
+      id: 'agent-ä',
+      codeExecutionContext: context({ bridgeWorkerId: 'worker-umlaut' }),
+    };
+    const earlierByCodeUnit = {
+      id: 'agent-z',
+      codeExecutionContext: context({ bridgeWorkerId: 'worker-z' }),
+    };
+
+    const binding = captureCodeExecutionApprovalBinding([
+      laterByCodeUnit,
+      earlierByCodeUnit,
+      earlierByCodeUnit,
+    ]);
+
+    expect(binding?.targets.map((target) => target.agentId)).toEqual(['agent-z', 'agent-ä']);
+  });
+
+  it.each([
+    ['route', { executionRouteKey: 'stateful:route-b' }],
+    ['worker', { bridgeWorkerId: 'worker-b' }],
+    ['workspace session', { runtimeSessionHint: 'v3:environment-a:agent-user:session-b' }],
+    [
+      'selected directory',
+      {
+        codeWorkspace: {
+          environmentId: 'environment-a',
+          workspaceId: 'project-b',
+          operations: ['read_file', 'execute_command'],
+        },
+      },
+    ],
+    ['base URL', { baseUrl: 'https://replacement.example/v1' }],
+  ])('rejects a changed %s before execution', (_label, overrides) => {
+    const binding = captureCodeExecutionApprovalBinding([
+      { id: 'agent-a', codeExecutionContext: context() },
+    ]);
+
+    expect(() =>
+      assertCodeExecutionApprovalBinding(binding, [
+        {
+          id: 'agent-a',
+          codeExecutionContext: context(overrides as Partial<CodeExecutionContext>),
+        },
+      ]),
+    ).toThrow('Retry the request and review the action again');
+  });
+
+  it('fails closed for a malformed persisted binding', () => {
+    expect(() =>
+      assertCodeExecutionApprovalBinding(
+        { version: 1, targets: [{ agentId: 'agent-a', targetHash: 'not-a-hash' }] },
+        [{ id: 'agent-a', codeExecutionContext: context() }],
+      ),
+    ).toThrow('attached code environment changed');
+  });
+
+  it('keeps pre-binding pauses backward compatible', () => {
+    expect(() =>
+      assertCodeExecutionApprovalBinding(undefined, [
+        { id: 'agent-a', codeExecutionContext: context() },
+      ]),
+    ).not.toThrow();
+  });
+
+  it('persists only the environment/workspace pair, not live capabilities', () => {
+    expect(getCodeWorkspaceSelections([context()])).toEqual([
+      { environmentId: 'environment-a', workspaceId: 'project-a' },
+    ]);
+  });
+});
+
+describe('codeExecutionAuthHeaders', () => {
+  let errorSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => logger);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('logs the failure that reaches the model as a generic authorization error', async () => {
+    const failure = new Error('code API signing key is not configured');
+
+    await expect(
+      codeExecutionAuthHeaders(() => Promise.reject(failure), {
+        executionProfile: 'stateful',
+        bridgeWorkerId: 'opaque-worker-id',
+      }),
+    ).rejects.toBe(failure);
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[codeExecutionAuthHeaders] Failed to resolve Code API auth headers | Profile: stateful | Worker: opaque-worker-id | Cause: Error: code API signing key is not configured',
+    );
+  });
+
+  it('omits the worker from the log when the request is not bridged', async () => {
+    await expect(
+      codeExecutionAuthHeaders(
+        () => {
+          throw new Error('boom');
+        },
+        { executionProfile: 'default' },
+      ),
+    ).rejects.toThrow('boom');
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[codeExecutionAuthHeaders] Failed to resolve Code API auth headers | Profile: default | Cause: Error: boom',
+    );
+  });
+
+  it('describes a rejection that cannot be converted to a string, and still rethrows it', async () => {
+    const hostile = Object.create(null) as Record<string, never>;
+
+    await expect(
+      codeExecutionAuthHeaders(() => Promise.reject(hostile), {
+        executionProfile: 'default',
+      }),
+    ).rejects.toBe(hostile);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[codeExecutionAuthHeaders] Failed to resolve Code API auth headers | Profile: default | Cause: undescribable rejection',
+    );
+  });
+
+  it('describes a rejection whose accessors throw, and still rethrows it', async () => {
+    const hostile = new Proxy(new Error('boom'), {
+      get(): never {
+        throw new Error('accessor exploded');
+      },
+    });
+
+    await expect(
+      codeExecutionAuthHeaders(() => Promise.reject(hostile), {
+        executionProfile: 'default',
+      }),
+    ).rejects.toBe(hostile);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[codeExecutionAuthHeaders] Failed to resolve Code API auth headers | Profile: default | Cause: undescribable rejection',
+    );
+  });
+
+  it('renders the cause verbatim through the formats a deployment actually uses', async () => {
+    errorSpy.mockRestore();
+    const rendered: string[] = [];
+    const capture = new winston.transports.Stream({
+      stream: new Writable({
+        write(chunk: Buffer, _encoding: string, done: () => void) {
+          rendered.push(String(chunk));
+          done();
+        },
+      }),
+      /* `splat()` is what would consume a `%s` in the cause as a substitution
+         token, and the bare printf is the console transport that prints
+         `info.message` alone. Both have to leave the cause intact. */
+      format: winston.format.combine(
+        winston.format.errors({ stack: true }),
+        winston.format.splat(),
+        winston.format.printf((info) => `${info.level}: ${info.message}`),
+      ),
+    });
+    const silenced = logger.transports.map((transport) => {
+      const previous = transport.silent;
+      transport.silent = true;
+      return { transport, previous };
+    });
+    logger.add(capture);
+
+    try {
+      await codeExecutionAuthHeaders(
+        () => Promise.reject(new Error('code API signing key is not configured')),
+        { executionProfile: 'stateful' },
+      ).catch(() => undefined);
+      await codeExecutionAuthHeaders(() => Promise.reject('service said %s unavailable'), {
+        executionProfile: 'stateful',
+      }).catch(() => undefined);
+    } finally {
+      logger.remove(capture);
+      silenced.forEach(({ transport, previous }) => {
+        transport.silent = previous;
+      });
+    }
+
+    const output = rendered.join('');
+    expect(output).toContain('Cause: Error: code API signing key is not configured');
+    expect(output).toContain('Cause: service said %s unavailable');
   });
 });

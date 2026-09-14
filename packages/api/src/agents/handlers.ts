@@ -1,10 +1,15 @@
 import yaml from 'js-yaml';
 import { Types } from 'mongoose';
-import { GraphEvents, Constants } from '@librechat/agents';
+import { GraphEvents, Constants, ToolEndHandler } from '@librechat/agents';
 import { logger, normalizeSkillFrontmatterKeys } from '@librechat/data-schemas';
-import { hasActivePiiFields, hasActivePiiPatterns } from 'librechat-data-provider';
+import {
+  hasActivePiiFields,
+  hasActivePiiPatterns,
+  hasToolCallErrorPrefix,
+} from 'librechat-data-provider';
 import type {
   LCTool,
+  FileRefs,
   EventHandler,
   LCToolRegistry,
   InjectedMessage,
@@ -12,20 +17,34 @@ import type {
   ToolExecuteResult,
   ToolExecuteBatchRequest,
   SubagentTaskConfig,
+  SubagentExecutionContext,
   CallerCapabilityProjectionSnapshot,
+  StreamEventData,
+  ToolEndCallback as SdkToolEndCallback,
 } from '@librechat/agents';
+import type { CodeEnvRef, CodeWorkspaceOperation, PtcToolCallEvent } from 'librechat-data-provider';
+import type { BackgroundToolResultClaim, ValidationIssue } from '@librechat/data-schemas';
 import type { StructuredToolInterface } from '@librechat/agents/langchain/tools';
-import type { CodeEnvRef, PtcToolCallEvent } from 'librechat-data-provider';
-import type { ValidationIssue } from '@librechat/data-schemas';
+import type { CodeEnvFile, CodeSessionContext } from '@librechat/agents';
+import type {
+  WorkspaceEditResult,
+  WorkspacePreviewEditResult,
+  WorkspaceListResult,
+  WorkspaceReadResult,
+  WorkspaceSearchResult,
+  WorkspaceWriteResult,
+} from '~/code/workspace';
 import type {
   BackgroundToolDeadClaimRecovery,
   BackgroundToolWakeupAdmission,
   BackgroundToolWakeupRegistration,
 } from './backgroundCompletion';
 import type { SkillFileRecord, PrimeSkillFilesResult } from './skillFiles';
+import type { ArtifactDeliveryFailure } from '~/files/code';
 import type { BackgroundToolResultState } from './harvest';
 import type { CodeExecutionContext } from './execution';
 import type { TextContentFragment } from '~/protection';
+import type { RunFileSession } from './files/session';
 import type { ServerRequest } from '~/types';
 import {
   backgroundTaskRegistry,
@@ -61,8 +80,20 @@ import {
   CREATE_FILE_TOOL_NAME,
   EDIT_FILE_TOOL_NAME,
   HOST_FILE_AUTHORING_ARTIFACT_KEY,
+  LIST_WORKSPACE_FILES_TOOL_NAME,
+  SEARCH_WORKSPACE_TOOL_NAME,
+  isCodeFileToolName,
   isCodeSessionToolName,
+  isFileResourceToolName,
 } from './tools';
+import {
+  createCodeApiRateLimitBudget,
+  isAbortError,
+  logAxiosError,
+  truncateMiddle,
+  runOutsideTracing,
+  getSafeErrorMetadata,
+} from '~/utils';
 import {
   ContentFilterError,
   contentFilterModelBoundBlockResponse,
@@ -73,15 +104,22 @@ import {
   BACKGROUND_TOOL_PRODUCER_HEARTBEAT_MS,
 } from './backgroundCompletion';
 import {
+  WorkspaceToolHttpError,
+  WORKSPACE_EDIT_MAX_COUNT,
+  WORKSPACE_WRITE_MAX_BYTES,
+} from '~/code/workspace';
+import {
   hasIntentArg,
   stripIntentArg,
   stripIntentLabelsFromToolDefinitions,
   INTENT_ARG,
 } from './intent';
-import { getSafeErrorMetadata, logAxiosError, runOutsideTracing, truncateMiddle } from '~/utils';
 import { buildSkillPrimeMessage, isSkillFilePath, SKILL_FILE_PREFIX } from './skills';
 import { resolveCallerCapabilityProjectionSnapshot } from './callerCapabilities';
+import { mergeCodeFilesIntoContext } from './codeFilesSession';
 import { createSkillContentDigest } from './compatibility';
+import { isMissingSandboxPathError } from '~/files/code';
+import { resolveDownloadPath } from '~/storage/path';
 import { parseFrontmatter } from '../skills/import';
 import { cleanCodeToolOutput } from './cleanup';
 import { primeSkillFiles } from './skillFiles';
@@ -152,6 +190,8 @@ export interface EventActorDetachedActionLifecycle {
 }
 
 export interface ToolEndCallbackMetadata {
+  /** SDK-authored lineage for artifacts generated inside a child execution. */
+  executionContext?: SubagentExecutionContext;
   run_id?: string;
   thread_id?: string;
   [key: string]: unknown;
@@ -162,7 +202,44 @@ export type ToolEndCallback = (
   metadata: ToolEndCallbackMetadata,
 ) => Promise<void>;
 
+/**
+ * Preserve the SDK's event-handler contract while attaching the graph-owned
+ * step identity to legacy artifact callbacks. `toolCallStepIds` is populated
+ * by ToolNode for the actual provider tool call; this wrapper never invents a
+ * fallback identity.
+ */
+export function createOwnedToolEndHandler(
+  callback: SdkToolEndCallback,
+  loggerArg: typeof logger = logger,
+): EventHandler {
+  const toolEndHandler = new ToolEndHandler(callback, loggerArg);
+  return {
+    handle: async (event, data: StreamEventData, metadata, graph) => {
+      const output = data?.output;
+      const toolCallId =
+        typeof output === 'object' && output != null
+          ? (output as { tool_call_id?: unknown }).tool_call_id
+          : undefined;
+      const stepId =
+        typeof toolCallId === 'string' ? graph?.toolCallStepIds?.get(toolCallId) : undefined;
+      const ownedMetadata =
+        typeof stepId === 'string' && stepId.length > 0
+          ? { ...(metadata ?? {}), stepId }
+          : metadata;
+      return toolEndHandler.handle(event, data, ownedMetadata, graph);
+    },
+  };
+}
+
 export interface ToolExecuteOptions {
+  /**
+   * Host-owned signal for the foreground run. This is authoritative across
+   * graph reconstruction (including approval resume); the SDK event signal is
+   * composed with it below so circuit-breaker cancellation is preserved too.
+   */
+  runSignal?: AbortSignal;
+  /** Run id owned by `runSignal`; detached child runs carry a different id. */
+  foregroundRunId?: string;
   /** Loads tools by name, using agentId to look up agent-specific context */
   loadTools: (
     toolNames: string[],
@@ -171,6 +248,10 @@ export interface ToolExecuteOptions {
     configurable?: Record<string, unknown>,
     /** SDK-owned live caller capability projection for this agent context. */
     callerCapabilityProjection?: CallerCapabilityProjectionSnapshot,
+    /** Effective cancellation signal for this tool-execute batch. */
+    signal?: AbortSignal,
+    /** SDK-authored lineage; never derive child identity from saved agent IDs. */
+    executionContext?: SubagentExecutionContext,
   ) => Promise<{
     loadedTools: StructuredToolInterface[];
     /** Additional configurable properties to merge (e.g., userMCPAuthMap) */
@@ -178,10 +259,23 @@ export interface ToolExecuteOptions {
   }>;
   /** Trusted detached-subagent task scope for polling and parent controls. */
   subagentTasks?: SubagentTaskConfig;
+  /** Shared-file grants and tool contexts scoped to the executing run instance. */
+  runFiles?: Pick<RunFileSession, 'isActive' | 'prepareTools' | 'withCodeExecution'>;
+  /** Trusted deployment gate for cooperative ordinary-tool cancellation. */
+  ordinaryToolCancellation?: boolean;
   /** Callback to process tool artifacts (code output files, file citations, etc.) */
   toolEndCallback?: ToolEndCallback;
   /** Durable internal-completion adapter, present only for an Event Actor invocation. */
   eventActorDetachedAction?: EventActorDetachedActionLifecycle;
+  /** Called once per batch before tool execution to lazily provision files to tool
+   *  environments. Resolves to the code-env refs it uploaded, which the caller folds
+   *  into this batch's code-session context. */
+  provisionFiles?: (
+    toolNames: string[],
+    agentId?: string,
+    signal?: AbortSignal,
+    executionContext?: SubagentExecutionContext,
+  ) => Promise<CodeEnvFile[] | void>;
   /**
    * Persists a backgrounded code-execution result onto the dispatch turn once
    * the detached call settles: downloads/persists generated files, patches the
@@ -227,15 +321,14 @@ export interface ToolExecuteOptions {
     claim: (params: {
       userId: string;
       conversationId: string;
-      messageId: string;
+      messageId?: string;
       taskId: string;
       agentId?: string;
       kind: 'manual';
       claimId: string;
-    }) => Promise<
-      | { status: 'acquired' | 'not_found' | 'not_ready' }
-      | { status: 'claimed'; claim?: { kind: 'manual' | 'wakeup'; claimId: string } }
-    >;
+      generationId?: string;
+      allowUnfinished?: boolean;
+    }) => Promise<BackgroundToolResultClaim>;
     recoverDeadClaim?: BackgroundToolDeadClaimRecovery;
   };
   /** Emits an `attachment` SSE event on the current request's live stream. */
@@ -391,6 +484,7 @@ export interface ToolExecuteOptions {
     codeApiBaseUrl?: string;
     executionProfile?: CodeExecutionContext['executionProfile'];
     bridgeWorkerId?: string;
+    signal?: AbortSignal;
   }) => Promise<{
     storage_session_id: string;
     files: Array<{ fileId: string; filename: string }>;
@@ -434,6 +528,77 @@ export interface ToolExecuteOptions {
     relativePath: string,
     update: { content?: string; isBinary?: boolean },
   ) => Promise<void>;
+  /** Reads a bounded text range from an attached worker's logical workspace. */
+  readWorkspaceFile?: (params: {
+    file_path: string;
+    workspace_id: string;
+    start_line: number;
+    max_lines: number;
+    codeApiBaseUrl: string;
+    executionProfile: CodeExecutionContext['executionProfile'];
+    bridgeWorkerId?: string;
+    req?: ServerRequest;
+    signal?: AbortSignal;
+  }) => Promise<WorkspaceReadResult>;
+  /** Searches literal text within an attached worker's logical workspace. */
+  searchWorkspace?: (params: {
+    query: string;
+    workspace_id: string;
+    path?: string;
+    max_results: number;
+    codeApiBaseUrl: string;
+    executionProfile: CodeExecutionContext['executionProfile'];
+    bridgeWorkerId?: string;
+    req?: ServerRequest;
+    signal?: AbortSignal;
+  }) => Promise<WorkspaceSearchResult>;
+  /** Lists relative file paths within an attached worker's logical workspace. */
+  listWorkspaceFiles?: (params: {
+    workspace_id: string;
+    path?: string;
+    after_path?: string;
+    max_results: number;
+    codeApiBaseUrl: string;
+    executionProfile: CodeExecutionContext['executionProfile'];
+    bridgeWorkerId?: string;
+    req?: ServerRequest;
+    signal?: AbortSignal;
+  }) => Promise<WorkspaceListResult>;
+  /** Writes a UTF-8 file within an attached worker's logical workspace. */
+  writeWorkspaceFile?: (params: {
+    file_path: string;
+    content: string;
+    overwrite: boolean;
+    workspace_id: string;
+    codeApiBaseUrl: string;
+    executionProfile: CodeExecutionContext['executionProfile'];
+    bridgeWorkerId?: string;
+    req?: ServerRequest;
+    signal?: AbortSignal;
+  }) => Promise<WorkspaceWriteResult>;
+  /** Previews exact replacements without mutating an attached worker workspace. */
+  previewWorkspaceEdit?: (params: {
+    file_path: string;
+    edits: Array<{ oldText: string; newText: string }>;
+    workspace_id: string;
+    codeApiBaseUrl: string;
+    executionProfile: CodeExecutionContext['executionProfile'];
+    bridgeWorkerId?: string;
+    req?: ServerRequest;
+    signal?: AbortSignal;
+  }) => Promise<WorkspacePreviewEditResult>;
+  /** Applies exact replacements atomically within an attached worker workspace. */
+  editWorkspaceFile?: (params: {
+    file_path: string;
+    edits: Array<{ oldText: string; newText: string }>;
+    expected_base_sha256?: string;
+    workspace_id: string;
+    codeApiBaseUrl: string;
+    executionProfile: CodeExecutionContext['executionProfile'];
+    bridgeWorkerId?: string;
+    req?: ServerRequest;
+    signal?: AbortSignal;
+  }) => Promise<WorkspaceEditResult>;
   /**
    * Reads a code-execution sandbox file by shelling `cat` through the
    * sandbox `/exec` endpoint. The host implementation supplies the
@@ -446,7 +611,7 @@ export interface ToolExecuteOptions {
   readSandboxFile?: (params: {
     file_path: string;
     session_id?: string;
-    files?: Array<{ id: string; name: string; session_id?: string; storage_session_id?: string }>;
+    files?: SandboxFileRef[];
     /** Per-conversation stateful runtime-session hint (thread_id); forwarded so a
      *  host file op that is the first sandbox call joins the same runtime session
      *  as bash_tool instead of the Code API's default session. */
@@ -470,7 +635,7 @@ export interface ToolExecuteOptions {
   readSandboxImage?: (params: {
     file_path: string;
     session_id?: string;
-    files?: Array<{ id: string; name: string; session_id?: string; storage_session_id?: string }>;
+    files?: SandboxFileRef[];
     /** @see readSandboxFile.runtime_session_hint */
     runtime_session_hint?: string;
     codeApiBaseUrl?: string;
@@ -480,6 +645,7 @@ export interface ToolExecuteOptions {
     /** In-sandbox size cap; files larger than this return `tooLarge` without transferring bytes. */
     maxBytes?: number;
     req?: ServerRequest;
+    signal?: AbortSignal;
   }) => Promise<
     | { base64: string; bytes: number }
     /** `size`: over `maxBytes`. `round_trips`: within the byte cap, but more
@@ -498,7 +664,7 @@ export interface ToolExecuteOptions {
     file_path: string;
     content: string;
     session_id?: string;
-    files?: Array<{ id: string; name: string; session_id?: string; storage_session_id?: string }>;
+    files?: SandboxFileRef[];
     /** @see readSandboxFile.runtime_session_hint */
     runtime_session_hint?: string;
     codeApiBaseUrl?: string;
@@ -508,12 +674,26 @@ export interface ToolExecuteOptions {
     stdout?: string;
     stderr?: string;
     session_id?: string;
-    files?: Array<{ id: string; name: string; storage_session_id?: string; session_id?: string }>;
+    files?: SandboxFileRef[];
+    artifact_delivery?: ArtifactDeliveryFailure;
   } | null>;
 }
 
 const MAX_READABLE_BYTES = 262_144;
 const MAX_BINARY_BYTES = 5 * 1024 * 1024;
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8');
+  if (bytes.byteLength <= maxBytes) {
+    return value;
+  }
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return bytes.subarray(0, end).toString('utf8');
+}
+
 /**
  * Inline ceiling for images pulled out of the code-execution sandbox —
  * deliberately tighter than {@link MAX_BINARY_BYTES}, which governs the
@@ -556,6 +736,31 @@ function getCodeExecutionContext(
     return undefined;
   }
   return candidate as CodeExecutionContext;
+}
+
+function selectedWorkspaceId(
+  context: CodeExecutionContext,
+  operation: CodeWorkspaceOperation,
+): string | undefined {
+  const workspace = context.codeWorkspace;
+  if (
+    workspace == null ||
+    workspace.environmentId !== context.environmentId ||
+    !workspace.operations.includes(operation)
+  ) {
+    return undefined;
+  }
+  return workspace.workspaceId;
+}
+
+function unavailableWorkspaceOperation(
+  tc: ToolCallRequest,
+  operation: CodeWorkspaceOperation,
+): ToolExecuteResult {
+  return errorResult(
+    tc,
+    `The selected attached workspace is unavailable or does not permit ${operation}. Choose an available workspace and retry.`,
+  );
 }
 
 function codeExecutionRequestParams(context?: CodeExecutionContext): {
@@ -624,6 +829,13 @@ function getSafeToolError(error: unknown): {
     message,
     logContext: {
       name: error instanceof Error ? error.name : typeof error,
+      ...(error instanceof WorkspaceToolHttpError
+        ? {
+            upstreamStatus: error.upstreamStatus,
+            upstreamBody: error.upstreamBody,
+            upstreamBodyTruncated: error.upstreamBodyTruncated,
+          }
+        : {}),
       message,
       messageLength: rawMessage.length,
       messageTruncated: message.length !== rawMessage.length,
@@ -746,10 +958,12 @@ function getValueShape(value: unknown): string {
   return typeof value;
 }
 
-function addLineNumbers(content: string): string {
+function addLineNumbers(content: string, startLine = 1): string {
   const lines = content.split('\n');
-  const w = String(lines.length).length;
-  return lines.map((l, i) => `${String(i + 1).padStart(w, ' ')} | ${l}`).join('\n');
+  const w = String(startLine + lines.length - 1).length;
+  return lines
+    .map((line, index) => `${String(startLine + index).padStart(w, ' ')} | ${line}`)
+    .join('\n');
 }
 
 type AuthoringSkill = NonNullable<
@@ -786,9 +1000,21 @@ type ExistingSkillFile =
 
 type LoadedSandboxText = LoadedSkillText;
 
+/**
+ * A code-session file ref as it crosses the host boundary: the SDK's wire
+ * shape (`kind` / `resource_id` / `version` / `inherited`) plus the legacy
+ * per-file `session_id` older Code API responses carry, which
+ * `getPreparedCodeOutputBuffer` still reads as a storage-session fallback.
+ * Every field is load-bearing on the wire — `version` is required for
+ * `kind: 'skill'` refs and `resource_id` names the resource that owns the
+ * file's storage session — so refs must be carried whole, never rebuilt
+ * from a subset.
+ */
+type SandboxFileRef = FileRefs[number] & { session_id?: string };
+
 type SandboxSessionContext = {
   session_id?: string;
-  files?: Array<{ id: string; name: string; session_id?: string; storage_session_id?: string }>;
+  files?: SandboxFileRef[];
 };
 
 const MIME_MAP: Readonly<Record<string, string>> = Object.freeze({
@@ -1873,24 +2099,6 @@ function looksBinary(content: string): boolean {
 }
 
 /**
- * True for the errors a sandbox raises about the requested PATH, and only
- * those. Deliberately narrower than {@link isSandboxMissingFileError}: that
- * predicate also accepts a bare "not found", which the sandbox reader emits
- * for a missing interpreter (`python3: not found`). Reporting that as a
- * missing image would send the model to `ls /mnt/data` while hiding a
- * runner dependency the operator needs to see.
- */
-function isMissingSandboxPathError(reason: string): boolean {
-  const message = reason.toLowerCase();
-  return (
-    message.includes('no such file or directory') ||
-    message.includes('cannot access') ||
-    message.includes('cannot find the path') ||
-    message.includes('enoent')
-  );
-}
-
-/**
  * Model-visible error for an image the sandbox could not hand back. The
  * read is a supported operation that FAILED, so the message must not reuse
  * the "images cannot be read as text" phrasing — that reads as a permanent
@@ -1931,6 +2139,7 @@ async function handleSandboxImageRead(
   req?: ServerRequest,
   codeExecutionContext?: CodeExecutionContext,
   onSuccess?: () => void,
+  signal?: AbortSignal,
 ): Promise<ToolExecuteResult> {
   const filtered = filteredBinaryFileResult(tc, req, filePath);
   if (filtered != null) {
@@ -1965,6 +2174,7 @@ async function handleSandboxImageRead(
       session_id: ctx?.session_id,
       files: ctx?.files,
       maxBytes: MAX_SANDBOX_INLINE_IMAGE_BYTES,
+      ...(signal ? { signal } : {}),
       ...codeExecutionRequestParams(codeExecutionContext),
       ...(req ? { req } : {}),
     });
@@ -2047,10 +2257,20 @@ async function handleSandboxFileFallback(
   req?: ServerRequest,
   codeExecutionContext?: CodeExecutionContext,
   onSuccess?: () => void,
+  signal?: AbortSignal,
 ): Promise<ToolExecuteResult> {
   const ext = lowercaseExtension(filePath);
   if (SANDBOX_IMAGE_EXTENSIONS.has(ext)) {
-    return handleSandboxImageRead(tc, filePath, ext, options, req, codeExecutionContext, onSuccess);
+    return handleSandboxImageRead(
+      tc,
+      filePath,
+      ext,
+      options,
+      req,
+      codeExecutionContext,
+      onSuccess,
+      signal,
+    );
   }
   const filteredName = filteredFileNameResult(tc, req, filePath);
   if (filteredName != null) {
@@ -2141,6 +2361,312 @@ async function handleSandboxFileFallback(
   }
 }
 
+async function handleWorkspaceFileRead(
+  tc: ToolCallRequest,
+  filePath: string,
+  options: ToolExecuteOptions,
+  req: ServerRequest | undefined,
+  codeExecutionContext: CodeExecutionContext,
+  signal?: AbortSignal,
+): Promise<ToolExecuteResult> {
+  const { readWorkspaceFile } = options;
+  if (!readWorkspaceFile) {
+    return {
+      toolCallId: tc.id,
+      status: 'error',
+      content: '',
+      errorMessage: 'Attached workspace reading is not configured.',
+    };
+  }
+  const workspaceId = selectedWorkspaceId(codeExecutionContext, 'read_file');
+  if (!workspaceId) return unavailableWorkspaceOperation(tc, 'read_file');
+  const args = tc.args as { start_line?: number; max_lines?: number };
+  const startLine = args.start_line ?? 1;
+  const maxLines = args.max_lines ?? 200;
+  if (filePath.length === 0) {
+    return {
+      toolCallId: tc.id,
+      status: 'error',
+      content: '',
+      errorMessage: 'A relative path after workspace/ is required.',
+    };
+  }
+  if (
+    !Number.isSafeInteger(startLine) ||
+    startLine < 1 ||
+    !Number.isSafeInteger(maxLines) ||
+    maxLines < 1 ||
+    maxLines > 500
+  ) {
+    return {
+      toolCallId: tc.id,
+      status: 'error',
+      content: '',
+      errorMessage: 'start_line must be positive and max_lines must be between 1 and 500.',
+    };
+  }
+  const filteredName = filteredFileNameResult(tc, req, filePath);
+  if (filteredName != null) {
+    return filteredName;
+  }
+
+  try {
+    const result = await readWorkspaceFile({
+      file_path: filePath,
+      workspace_id: workspaceId,
+      start_line: startLine,
+      max_lines: maxLines,
+      codeApiBaseUrl: codeExecutionContext.baseUrl,
+      executionProfile: codeExecutionContext.executionProfile,
+      ...(codeExecutionContext.bridgeWorkerId
+        ? { bridgeWorkerId: codeExecutionContext.bridgeWorkerId }
+        : {}),
+      ...(req ? { req } : {}),
+      ...(signal ? { signal } : {}),
+    });
+    const filtered = filteredFileResult(tc, req, filePath, result.content);
+    if (filtered != null) {
+      return filtered;
+    }
+    if (looksBinary(result.content)) {
+      return {
+        toolCallId: tc.id,
+        status: 'error',
+        content: '',
+        errorMessage: `"${filePath}" appears to be a binary file and cannot be read as text.`,
+      };
+    }
+    let payload = result.content;
+    let locallyTruncated = false;
+    let localNextStartLine: number | undefined;
+    if (Buffer.byteLength(payload, 'utf8') > MAX_READABLE_BYTES) {
+      payload = truncateUtf8(payload, MAX_READABLE_BYTES);
+      locallyTruncated = true;
+      const lastCompleteLine = payload.lastIndexOf('\n');
+      if (lastCompleteLine >= 0) {
+        payload = payload.slice(0, lastCompleteLine);
+        localNextStartLine = result.startLine + payload.split('\n').length;
+      }
+    }
+    let numbered = addLineNumbers(payload, result.startLine);
+    if (locallyTruncated) {
+      numbered +=
+        localNextStartLine != null
+          ? `\n\n[truncated at ${MAX_READABLE_BYTES} bytes; more content is available; call read_file again with path "workspace/${filePath}" and start_line ${localNextStartLine}]`
+          : `\n\n[the line was truncated at ${MAX_READABLE_BYTES} bytes and cannot be paged by line]`;
+    } else if (result.truncated && result.nextStartLine != null) {
+      numbered += `\n\n[more content is available; call read_file again with path "workspace/${filePath}" and start_line ${result.nextStartLine}]`;
+    }
+    return {
+      toolCallId: tc.id,
+      status: 'success',
+      content: numbered,
+    };
+  } catch (error) {
+    if (error instanceof WorkspaceToolHttpError) throw error;
+    if (signal?.aborted === true && isAbortError(error)) throw error;
+    logger.warn(
+      '[handleWorkspaceFileRead] Attached workspace read failed',
+      getSafeErrorMetadata(error),
+    );
+    return {
+      toolCallId: tc.id,
+      status: 'error',
+      content: '',
+      errorMessage: `"${filePath}" could not be read from the attached workspace.`,
+    };
+  }
+}
+
+async function handleWorkspaceSearchCall(
+  tc: ToolCallRequest,
+  mergedConfigurable: Record<string, unknown> | undefined,
+  options: ToolExecuteOptions,
+  req: ServerRequest | undefined,
+  signal?: AbortSignal,
+): Promise<ToolExecuteResult> {
+  const codeExecutionContext = getCodeExecutionContext(mergedConfigurable ?? {});
+  if (
+    mergedConfigurable?.codeEnvAvailable !== true ||
+    codeExecutionContext?.environmentType !== 'attached'
+  ) {
+    return errorResult(tc, 'search_workspace requires an attached code environment.');
+  }
+  if (!options.searchWorkspace) {
+    return errorResult(tc, 'Attached workspace search is not configured.');
+  }
+  const workspaceId = selectedWorkspaceId(codeExecutionContext, 'search_text');
+  if (!workspaceId) return unavailableWorkspaceOperation(tc, 'search_text');
+
+  const args = tc.args as { query?: unknown; path?: unknown; max_results?: unknown };
+  const maxResults = args.max_results ?? 50;
+  if (
+    typeof args.query !== 'string' ||
+    args.query.length === 0 ||
+    args.query.length > 4096 ||
+    (args.path != null && typeof args.path !== 'string') ||
+    !Number.isSafeInteger(maxResults) ||
+    Number(maxResults) < 1 ||
+    Number(maxResults) > 200
+  ) {
+    return errorResult(tc, 'query, path, or max_results is invalid for workspace search.');
+  }
+
+  try {
+    const result = await options.searchWorkspace({
+      query: args.query,
+      workspace_id: workspaceId,
+      ...(typeof args.path === 'string' && args.path.length > 0 ? { path: args.path } : {}),
+      max_results: Number(maxResults),
+      codeApiBaseUrl: codeExecutionContext.baseUrl,
+      executionProfile: codeExecutionContext.executionProfile,
+      ...(codeExecutionContext.bridgeWorkerId
+        ? { bridgeWorkerId: codeExecutionContext.bridgeWorkerId }
+        : {}),
+      ...(req ? { req } : {}),
+      ...(signal ? { signal } : {}),
+    });
+
+    for (const match of result.matches) {
+      const filtered = filteredFileResult(tc, req, match.path, match.text);
+      if (filtered != null) return filtered;
+    }
+    const unboundedContent =
+      result.matches.length === 0
+        ? 'No matches found.'
+        : result.matches
+            .map((match) => `workspace/${match.path}:${match.line}:${match.column}: ${match.text}`)
+            .join('\n');
+    const truncationNotice = '\n\n[results truncated]';
+    const locallyTruncated = Buffer.byteLength(unboundedContent, 'utf8') > MAX_READABLE_BYTES;
+    const truncated = locallyTruncated || result.truncated;
+    const content = truncated
+      ? truncateUtf8(
+          unboundedContent,
+          MAX_READABLE_BYTES - Buffer.byteLength(truncationNotice, 'utf8'),
+        )
+      : unboundedContent;
+    return {
+      toolCallId: tc.id,
+      status: 'success',
+      content: truncated ? `${content}${truncationNotice}` : content,
+    };
+  } catch (error) {
+    if (error instanceof WorkspaceToolHttpError) throw error;
+    if (signal?.aborted === true && isAbortError(error)) throw error;
+    logger.warn(
+      '[handleWorkspaceSearchCall] Attached workspace search failed',
+      getSafeErrorMetadata(error),
+    );
+    return errorResult(tc, 'The attached workspace could not be searched.');
+  }
+}
+
+async function handleWorkspaceListCall(
+  tc: ToolCallRequest,
+  mergedConfigurable: Record<string, unknown> | undefined,
+  options: ToolExecuteOptions,
+  req: ServerRequest | undefined,
+  signal?: AbortSignal,
+): Promise<ToolExecuteResult> {
+  const codeExecutionContext = getCodeExecutionContext(mergedConfigurable ?? {});
+  if (
+    mergedConfigurable?.codeEnvAvailable !== true ||
+    codeExecutionContext?.environmentType !== 'attached'
+  ) {
+    return errorResult(tc, 'list_workspace_files requires an attached code environment.');
+  }
+  if (!options.listWorkspaceFiles) {
+    return errorResult(tc, 'Attached workspace file listing is not configured.');
+  }
+  const workspaceId = selectedWorkspaceId(codeExecutionContext, 'list_files');
+  if (!workspaceId) return unavailableWorkspaceOperation(tc, 'list_files');
+
+  const args = tc.args as { path?: unknown; after_path?: unknown; max_results?: unknown };
+  const maxResults = args.max_results ?? 100;
+  if (
+    (args.path != null && typeof args.path !== 'string') ||
+    (args.after_path != null && typeof args.after_path !== 'string') ||
+    !Number.isSafeInteger(maxResults) ||
+    Number(maxResults) < 1 ||
+    Number(maxResults) > 500
+  ) {
+    return errorResult(
+      tc,
+      'path, after_path, or max_results is invalid for workspace file listing.',
+    );
+  }
+
+  try {
+    const result = await options.listWorkspaceFiles({
+      workspace_id: workspaceId,
+      ...(typeof args.path === 'string' && args.path.length > 0 ? { path: args.path } : {}),
+      ...(typeof args.after_path === 'string' && args.after_path.length > 0
+        ? { after_path: args.after_path }
+        : {}),
+      max_results: Number(maxResults),
+      codeApiBaseUrl: codeExecutionContext.baseUrl,
+      executionProfile: codeExecutionContext.executionProfile,
+      ...(codeExecutionContext.bridgeWorkerId
+        ? { bridgeWorkerId: codeExecutionContext.bridgeWorkerId }
+        : {}),
+      ...(req ? { req } : {}),
+      ...(signal ? { signal } : {}),
+    });
+
+    for (const path of result.paths) {
+      const filtered = filteredFileNameResult(tc, req, path);
+      if (filtered != null) return filtered;
+    }
+    if (result.paths.length === 0) {
+      return {
+        toolCallId: tc.id,
+        status: 'success',
+        content: 'The attached workspace contains no discoverable files in that path.',
+      };
+    }
+    const renderedPaths: string[] = [];
+    let content = '';
+    let contentBytes = 0;
+    for (const [index, path] of result.paths.entries()) {
+      const entry = `workspace/${path}`;
+      const separator = renderedPaths.length > 0 ? '\n' : '';
+      const hasMore = index < result.paths.length - 1 || result.truncated;
+      const notice = hasMore
+        ? `\n\n[results truncated; continue with after_path: ${JSON.stringify(path)}]`
+        : '';
+      const entryBytes = Buffer.byteLength(`${separator}${entry}`, 'utf8');
+      if (contentBytes + entryBytes + Buffer.byteLength(notice, 'utf8') > MAX_READABLE_BYTES) {
+        break;
+      }
+      renderedPaths.push(entry);
+      content += `${separator}${entry}`;
+      contentBytes += entryBytes;
+    }
+    const locallyTruncated = renderedPaths.length < result.paths.length;
+    const continuationPath = locallyTruncated
+      ? result.paths[renderedPaths.length - 1]
+      : result.nextAfterPath;
+    const truncated = locallyTruncated || result.truncated;
+    const truncationNotice = truncated
+      ? `\n\n[results truncated; continue with after_path: ${JSON.stringify(continuationPath)}]`
+      : '';
+    return {
+      toolCallId: tc.id,
+      status: 'success',
+      content: `${content}${truncationNotice}`,
+    };
+  } catch (error) {
+    if (error instanceof WorkspaceToolHttpError) throw error;
+    if (signal?.aborted === true && isAbortError(error)) throw error;
+    logger.warn(
+      '[handleWorkspaceListCall] Attached workspace file listing failed',
+      getSafeErrorMetadata(error),
+    );
+    return errorResult(tc, 'The attached workspace files could not be listed.');
+  }
+}
+
 function sandboxSessionContext(
   tc: ToolCallRequest,
   override?: SandboxSessionContext,
@@ -2157,6 +2683,24 @@ function cloneSandboxSessionContext(
   };
 }
 
+/** Storage identity of a mounted ref, matching the code session's own key. */
+function sandboxFileIdentity(file: SandboxFileRef): string {
+  return `${file.storage_session_id ?? ''}\0${file.id}`;
+}
+
+/**
+ * Folds a host file-authoring result's `session_id` / `files` into the
+ * batch-local sandbox context that the next authoring call on the same path
+ * reuses, matching how the graph's own code session folds the same artifact:
+ * incoming refs win field by field, an existing ref superseded by storage
+ * identity or by name is dropped, and every other mounted ref survives.
+ *
+ * Both halves are load-bearing. Rebuilding refs from a field subset dropped
+ * `kind`, `resource_id`, `version` and `inherited`, and a primed skill file
+ * stripped of its `version` is an invalid input ref — the Code API requires
+ * it whenever `kind === 'skill'`. Replacing the list wholesale unmounted
+ * every file the run had primed but this particular write did not return.
+ */
 function mergeSandboxSessionArtifact(
   context: SandboxSessionContext,
   artifact: ToolExecuteResult['artifact'],
@@ -2175,41 +2719,68 @@ function mergeSandboxSessionArtifact(
     return;
   }
 
-  const files: SandboxSessionContext['files'] = [];
+  const execSessionId = context.session_id;
+  const incoming: SandboxFileRef[] = [];
+  const incomingByIdentity = new Map<string, number>();
+  const incomingNames = new Set<string>();
   for (const file of value.files) {
     if (!file || typeof file !== 'object') {
       continue;
     }
-    const ref = file as {
-      id?: unknown;
-      name?: unknown;
-      session_id?: unknown;
-      storage_session_id?: unknown;
-    };
+    const ref = file as SandboxFileRef;
     if (typeof ref.id !== 'string' || typeof ref.name !== 'string') {
       continue;
     }
-    files.push({
-      id: ref.id,
-      name: ref.name,
-      ...(typeof ref.session_id === 'string' ? { session_id: ref.session_id } : {}),
-      ...(typeof ref.storage_session_id === 'string'
-        ? { storage_session_id: ref.storage_session_id }
-        : {}),
-    });
+    /* Carry the ref whole: the Code API reads fields this host never
+     * inspects, so a copy is a downgrade. Only the storage session is
+     * defaulted, and it resolves exactly as `getPreparedCodeOutputBuffer`
+     * resolves it — the legacy per-file `session_id` outranks the execution
+     * session, or an older Code API response would be remounted against the
+     * bucket that merely produced it. */
+    const merged: SandboxFileRef = { ...ref };
+    merged.storage_session_id ??= ref.session_id ?? execSessionId;
+
+    /* One artifact can name the same stored file twice. Fold the repeat into
+     * the entry already collected rather than mounting it again: codeapi
+     * rejects an `/exec` whose files collide on a destination, taking the
+     * whole call down with it. */
+    const identity = sandboxFileIdentity(merged);
+    const seen = incomingByIdentity.get(identity);
+    if (seen !== undefined) {
+      incoming[seen] = { ...incoming[seen], ...merged };
+      continue;
+    }
+    incomingByIdentity.set(identity, incoming.length);
+    incomingNames.add(merged.name);
+    incoming.push(merged);
   }
-  if (files.length > 0) {
-    context.files = files;
+  if (incoming.length === 0) {
+    return;
   }
+
+  const retained: SandboxFileRef[] = [];
+  for (const existing of context.files ?? []) {
+    const index = incomingByIdentity.get(sandboxFileIdentity(existing));
+    if (index !== undefined) {
+      incoming[index] = { ...existing, ...incoming[index] };
+      continue;
+    }
+    if (!incomingNames.has(existing.name)) {
+      retained.push(existing);
+    }
+  }
+  context.files = [...retained, ...incoming];
 }
 
+/**
+ * Broader than {@link isMissingSandboxPathError}: the authoring flow also
+ * treats a bare "not found" as an absent file, because a `cat` that cannot
+ * start is indistinguishable from a `cat` that found nothing as far as
+ * "should this create or overwrite?" is concerned.
+ */
 function isSandboxMissingFileError(error: unknown): boolean {
-  const message = getThrownValueMessage(error).toLowerCase();
-  return (
-    message.includes('no such file or directory') ||
-    message.includes('cannot access') ||
-    message.includes('not found')
-  );
+  const message = getThrownValueMessage(error);
+  return isMissingSandboxPathError(message) || message.toLowerCase().includes('not found');
 }
 
 function invalidSandboxAuthoringPath(filePath: string): string | null {
@@ -2360,6 +2931,13 @@ async function writeSandboxTextForAuthoring({
   }
   if (!writeResult) {
     return errorResult(tc, `Failed to write "${filePath}" to the code-execution sandbox.`);
+  }
+  if (writeResult.artifact_delivery) {
+    const { attempted, failed } = writeResult.artifact_delivery;
+    return errorResult(
+      tc,
+      `Wrote "${filePath}" in the sandbox, but ${failed} of ${attempted} generated files could not be persisted. The file is not guaranteed to be available to later calls or downloadable. The execution may have had side effects; do not retry automatically.`,
+    );
   }
 
   const action = created ? 'Created' : 'Updated';
@@ -2784,7 +3362,7 @@ async function loadSkillFileTextForAuthoring({
     return { status: 'error', message: 'Download is not supported for this storage backend.' };
   }
 
-  const stream = await strategy.getDownloadStream(req, file.filepath);
+  const stream = await strategy.getDownloadStream(req, resolveDownloadPath(file));
   const chunks: Uint8Array[] = [];
   let streamedBytes = 0;
   for await (const chunk of stream as AsyncIterable<Uint8Array>) {
@@ -3158,6 +3736,211 @@ async function writeBundledSkillFile({
   });
 }
 
+function attachedWorkspaceAuthoringPath(
+  tc: ToolCallRequest,
+  filePath: string,
+): { filePath: string } | ToolExecuteResult {
+  if (!filePath.startsWith('workspace/')) {
+    return errorResult(tc, 'Attached environment file paths must use "workspace/{relativePath}".');
+  }
+  const relativePath = filePath.slice('workspace/'.length);
+  const pathError = invalidSandboxAuthoringPath(relativePath);
+  return pathError ? errorResult(tc, pathError) : { filePath: relativePath };
+}
+
+function attachedWorkspaceMutationParams(
+  codeExecutionContext: CodeExecutionContext,
+  workspaceId: string,
+  req: ServerRequest | undefined,
+  signal: AbortSignal | undefined,
+): {
+  workspace_id: string;
+  codeApiBaseUrl: string;
+  executionProfile: CodeExecutionContext['executionProfile'];
+  bridgeWorkerId?: string;
+  req?: ServerRequest;
+  signal?: AbortSignal;
+} {
+  return {
+    workspace_id: workspaceId,
+    codeApiBaseUrl: codeExecutionContext.baseUrl,
+    executionProfile: codeExecutionContext.executionProfile,
+    ...(codeExecutionContext.bridgeWorkerId
+      ? { bridgeWorkerId: codeExecutionContext.bridgeWorkerId }
+      : {}),
+    ...(req ? { req } : {}),
+    ...(signal ? { signal } : {}),
+  };
+}
+
+async function handleAttachedWorkspaceCreateFileCall({
+  tc,
+  options,
+  req,
+  filePath,
+  content,
+  overwrite,
+  codeExecutionContext,
+  signal,
+}: {
+  tc: ToolCallRequest;
+  options: ToolExecuteOptions;
+  req?: ServerRequest;
+  filePath: string;
+  content: string;
+  overwrite: boolean;
+  codeExecutionContext: CodeExecutionContext;
+  signal?: AbortSignal;
+}): AuthoringResult {
+  if (!options.writeWorkspaceFile) {
+    return errorResult(tc, 'Attached workspace file writing is not configured.');
+  }
+  const path = attachedWorkspaceAuthoringPath(tc, filePath);
+  if ('status' in path) return path;
+  if (new TextEncoder().encode(content).byteLength > WORKSPACE_WRITE_MAX_BYTES) {
+    return errorResult(tc, 'Attached workspace files are limited to 1 MiB per write.');
+  }
+  const filtered = filteredFileResult(tc, req, path.filePath, content);
+  if (filtered != null) return filtered;
+  const workspaceId = selectedWorkspaceId(codeExecutionContext, 'write_file');
+  if (!workspaceId) return unavailableWorkspaceOperation(tc, 'write_file');
+
+  try {
+    const result = await options.writeWorkspaceFile({
+      file_path: path.filePath,
+      content,
+      overwrite,
+      ...attachedWorkspaceMutationParams(codeExecutionContext, workspaceId, req, signal),
+    });
+    const action = result.created ? 'Created' : 'Updated';
+    return successResult(tc, `${action} workspace/${path.filePath} (${content.length} chars).`, {
+      path: `workspace/${path.filePath}`,
+      [HOST_FILE_AUTHORING_ARTIFACT_KEY]: true,
+      bytes_written: result.bytesWritten,
+      created: result.created,
+    });
+  } catch (error) {
+    if (error instanceof WorkspaceToolHttpError) {
+      if (error.upstreamStatus === 409 && !overwrite) {
+        error.message += '. File already exists. Pass overwrite: true to replace.';
+      }
+      throw error;
+    }
+    if (signal?.aborted === true && isAbortError(error)) throw error;
+    logger.warn('[file_authoring] Attached workspace write failed', getSafeErrorMetadata(error));
+    return errorResult(tc, `Failed to write "workspace/${path.filePath}".`);
+  }
+}
+
+async function handleAttachedWorkspaceEditFileCall({
+  tc,
+  options,
+  req,
+  filePath,
+  edits,
+  codeExecutionContext,
+  signal,
+}: {
+  tc: ToolCallRequest;
+  options: ToolExecuteOptions;
+  req?: ServerRequest;
+  filePath: string;
+  edits: TextEdit[];
+  codeExecutionContext: CodeExecutionContext;
+  signal?: AbortSignal;
+}): AuthoringResult {
+  if (!options.editWorkspaceFile) {
+    return errorResult(tc, 'Attached workspace file editing is not configured.');
+  }
+  const path = attachedWorkspaceAuthoringPath(tc, filePath);
+  if ('status' in path) return path;
+  if (edits.length > WORKSPACE_EDIT_MAX_COUNT) {
+    return errorResult(
+      tc,
+      `Attached workspace edits are limited to ${WORKSPACE_EDIT_MAX_COUNT} replacements per call.`,
+    );
+  }
+  const editBytes = edits.reduce(
+    (bytes, edit) =>
+      bytes +
+      new TextEncoder().encode(edit.old_text).byteLength +
+      new TextEncoder().encode(edit.new_text).byteLength,
+    0,
+  );
+  if (editBytes > WORKSPACE_WRITE_MAX_BYTES) {
+    return errorResult(tc, 'Attached workspace edit text is limited to 1 MiB per call.');
+  }
+  const filteredName = filteredFileNameResult(tc, req, path.filePath);
+  if (filteredName != null) return filteredName;
+  const workspaceId = selectedWorkspaceId(codeExecutionContext, 'edit_file');
+  if (!workspaceId) return unavailableWorkspaceOperation(tc, 'edit_file');
+
+  try {
+    const workspaceEdits = edits.map((edit) => ({
+      oldText: edit.old_text,
+      newText: edit.new_text,
+    }));
+    let expectedBaseSha256: string | undefined;
+    if (hasActiveFileFieldPolicy(req?.config?.filters, ['content', 'extracted_text'])) {
+      if (!options.previewWorkspaceEdit) {
+        return errorResult(
+          tc,
+          'Attached workspace editing requires an updated BYOM worker while file-content protections are enabled.',
+        );
+      }
+      if (!selectedWorkspaceId(codeExecutionContext, 'preview_edit')) {
+        return unavailableWorkspaceOperation(tc, 'preview_edit');
+      }
+      let preview: WorkspacePreviewEditResult;
+      try {
+        preview = await options.previewWorkspaceEdit({
+          file_path: path.filePath,
+          edits: workspaceEdits,
+          ...attachedWorkspaceMutationParams(codeExecutionContext, workspaceId, req, signal),
+        });
+      } catch (error) {
+        if (signal?.aborted === true && isAbortError(error)) throw error;
+        if (error instanceof WorkspaceToolHttpError && error.upstreamStatus === 400) {
+          error.message +=
+            '. This attached environment must update its LibreChat Code worker before protected files can be edited.';
+        }
+        throw error;
+      }
+      const filteredContent = filteredFileResult(tc, req, path.filePath, preview.content);
+      if (filteredContent != null) return filteredContent;
+      expectedBaseSha256 = preview.baseSha256;
+    }
+    const result = await options.editWorkspaceFile({
+      file_path: path.filePath,
+      edits: workspaceEdits,
+      ...(expectedBaseSha256 ? { expected_base_sha256: expectedBaseSha256 } : {}),
+      ...attachedWorkspaceMutationParams(codeExecutionContext, workspaceId, req, signal),
+    });
+    return successResult(
+      tc,
+      `Updated workspace/${path.filePath} with ${result.replacements} exact replacement${result.replacements === 1 ? '' : 's'}.`,
+      {
+        path: `workspace/${path.filePath}`,
+        [HOST_FILE_AUTHORING_ARTIFACT_KEY]: true,
+        bytes_written: result.bytesWritten,
+        created: false,
+        edits: result.replacements,
+        strategies: Array.from({ length: result.replacements }, () => 'exact'),
+      },
+    );
+  } catch (error) {
+    if (error instanceof WorkspaceToolHttpError) {
+      if (error.upstreamStatus === 409) {
+        error.message += `; The requested text did not match exactly once in "workspace/${path.filePath}". Re-read the file and retry.`;
+      }
+      throw error;
+    }
+    if (signal?.aborted === true && isAbortError(error)) throw error;
+    logger.warn('[file_authoring] Attached workspace edit failed', getSafeErrorMetadata(error));
+    return errorResult(tc, `Failed to edit "workspace/${path.filePath}".`);
+  }
+}
+
 async function handleSandboxCreateFileCall({
   tc,
   options,
@@ -3167,6 +3950,7 @@ async function handleSandboxCreateFileCall({
   overwrite,
   sandboxContext,
   codeExecutionContext,
+  signal,
 }: {
   tc: ToolCallRequest;
   options: ToolExecuteOptions;
@@ -3176,7 +3960,20 @@ async function handleSandboxCreateFileCall({
   overwrite: boolean;
   sandboxContext?: SandboxSessionContext;
   codeExecutionContext?: CodeExecutionContext;
+  signal?: AbortSignal;
 }): AuthoringResult {
+  if (codeExecutionContext?.environmentType === 'attached') {
+    return await handleAttachedWorkspaceCreateFileCall({
+      tc,
+      options,
+      req,
+      filePath,
+      content,
+      overwrite,
+      codeExecutionContext,
+      signal,
+    });
+  }
   const pathError = invalidSandboxAuthoringPath(filePath);
   if (pathError) {
     return errorResult(tc, pathError);
@@ -3218,6 +4015,7 @@ async function handleSandboxEditFileCall({
   edits,
   sandboxContext,
   codeExecutionContext,
+  signal,
 }: {
   tc: ToolCallRequest;
   options: ToolExecuteOptions;
@@ -3226,7 +4024,19 @@ async function handleSandboxEditFileCall({
   edits: TextEdit[];
   sandboxContext?: SandboxSessionContext;
   codeExecutionContext?: CodeExecutionContext;
+  signal?: AbortSignal;
 }): AuthoringResult {
+  if (codeExecutionContext?.environmentType === 'attached') {
+    return await handleAttachedWorkspaceEditFileCall({
+      tc,
+      options,
+      req,
+      filePath,
+      edits,
+      codeExecutionContext,
+      signal,
+    });
+  }
   const pathError = invalidSandboxAuthoringPath(filePath);
   if (pathError) {
     return errorResult(tc, pathError);
@@ -3286,6 +4096,7 @@ async function handleCreateFileCall(
   req?: ServerRequest,
   sourceConfigurable?: Record<string, unknown>,
   sandboxContext?: SandboxSessionContext,
+  signal?: AbortSignal,
 ): AuthoringResult {
   const args = tc.args as { path?: unknown; content?: unknown; overwrite?: unknown };
   if (typeof args.path !== 'string' || args.path.length === 0) {
@@ -3320,6 +4131,7 @@ async function handleCreateFileCall(
       overwrite,
       sandboxContext,
       codeExecutionContext: getCodeExecutionContext(mergedConfigurable),
+      signal,
     });
   }
 
@@ -3399,6 +4211,7 @@ async function handleEditFileCall(
   options: ToolExecuteOptions,
   req?: ServerRequest,
   sandboxContext?: SandboxSessionContext,
+  signal?: AbortSignal,
 ): AuthoringResult {
   const args = tc.args as {
     path?: unknown;
@@ -3430,6 +4243,7 @@ async function handleEditFileCall(
       edits,
       sandboxContext,
       codeExecutionContext: getCodeExecutionContext(mergedConfigurable),
+      signal,
     });
   }
 
@@ -3533,6 +4347,7 @@ async function handleReadFileCall(
   options: ToolExecuteOptions,
   req?: ServerRequest,
   onSandboxReadSuccess?: () => void,
+  signal?: AbortSignal,
 ): Promise<ToolExecuteResult> {
   const { getSkillByName, getSkillFileByPath, getStrategyFunctions, updateSkillFileContent } =
     options;
@@ -3550,6 +4365,25 @@ async function handleReadFileCall(
   const codeExecutionContext = getCodeExecutionContext(mergedConfigurable);
   let accessibleIds = (mergedConfigurable?.accessibleSkillIds as Types.ObjectId[]) ?? [];
 
+  if (args.path.startsWith('workspace/')) {
+    if (!codeEnvAvailable || codeExecutionContext?.environmentType !== 'attached') {
+      return {
+        toolCallId: tc.id,
+        status: 'error',
+        content: '',
+        errorMessage: 'workspace/ paths require an attached code environment.',
+      };
+    }
+    return handleWorkspaceFileRead(
+      tc,
+      args.path.slice('workspace/'.length),
+      options,
+      req,
+      codeExecutionContext,
+      signal,
+    );
+  }
+
   /**
    * Short-circuit absolute code-env paths: the path can never be a skill
    * reference (skill paths are relative `{skillName}/...`), and consulting
@@ -3564,6 +4398,7 @@ async function handleReadFileCall(
         req,
         codeExecutionContext,
         onSandboxReadSuccess,
+        signal,
       );
     }
     return {
@@ -3600,6 +4435,7 @@ async function handleReadFileCall(
           req,
           codeExecutionContext,
           onSandboxReadSuccess,
+          signal,
         );
       }
       return {
@@ -3627,6 +4463,7 @@ async function handleReadFileCall(
           req,
           codeExecutionContext,
           onSandboxReadSuccess,
+          signal,
         );
       }
       return {
@@ -3696,6 +4533,7 @@ async function handleReadFileCall(
         req,
         codeExecutionContext,
         onSandboxReadSuccess,
+        signal,
       );
     }
     return {
@@ -3742,6 +4580,7 @@ async function handleReadFileCall(
           req,
           codeExecutionContext,
           onSandboxReadSuccess,
+          signal,
         );
       }
       return {
@@ -3941,7 +4780,7 @@ async function handleReadFileCall(
       };
     }
 
-    const stream = await strategy.getDownloadStream(req, file.filepath);
+    const stream = await strategy.getDownloadStream(req, resolveDownloadPath(file));
     const chunks: Uint8Array[] = [];
     // Use the larger binary limit as streaming cap; cheaper type-specific
     // checks happen after binary detection on the assembled buffer.
@@ -4067,6 +4906,8 @@ async function handleSkillToolCall(
   options: ToolExecuteOptions,
   agentId?: string,
   req?: ServerRequest,
+  signal?: AbortSignal,
+  rateLimitBudget?: import('~/utils').CodeApiRateLimitBudget,
 ): Promise<ToolExecuteResult> {
   const {
     getSkillByName,
@@ -4182,7 +5023,9 @@ async function handleSkillToolCall(
   ) {
     let primeResult: PrimeSkillFilesResult | null = null;
     try {
+      signal?.throwIfAborted();
       const skillFiles = await listSkillFiles(skill._id);
+      signal?.throwIfAborted();
       primeResult = await primeSkillFiles({
         skill,
         skillFiles,
@@ -4193,6 +5036,8 @@ async function handleSkillToolCall(
         checkIfActive,
         updateSkillFileCodeEnvIds,
         codeExecutionContext,
+        signal,
+        rateLimitBudget,
       });
       if (primeResult) {
         /* `session_id` at the top of the artifact is the (representative)
@@ -4217,6 +5062,9 @@ async function handleSkillToolCall(
         };
       }
     } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
       if (isContentFilterError(error)) {
         return error instanceof ContentFilterError
           ? errorResult(tc, modelBoundContentFilterErrorMessage(error.body))
@@ -4291,7 +5139,7 @@ function getFileAuthoringQueueKey(
  * failed background run renders as clean stdout.
  */
 function toBackgroundToolFailure(toolName: string, message: string): string {
-  if (/^Error:\s*(\[.*?\]\s*)*tool call failed:/i.test(message)) {
+  if (hasToolCallErrorPrefix(message)) {
     return message;
   }
   return `Error: [${toolName}] tool call failed: ${message}`;
@@ -4399,6 +5247,8 @@ function buildToolCallConfig(
 
 export function createToolExecuteHandler(options: ToolExecuteOptions): EventHandler {
   const {
+    runSignal: hostRunSignal,
+    foregroundRunId,
     loadTools,
     toolEndCallback,
     eventActorDetachedAction,
@@ -4407,11 +5257,47 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
     emitAttachment,
     emitPtcProgress,
     subagentTasks,
+    runFiles,
+    ordinaryToolCancellation = false,
+    provisionFiles,
   } = options;
 
   return {
     handle: async (_event: string, data: ToolExecuteBatchRequest) => {
-      const { toolCalls, agentId, configurable, metadata, resolve, reject } = data;
+      const {
+        toolCalls,
+        agentId,
+        configurable: incomingConfigurable,
+        metadata: incomingMetadata,
+        signal: eventRunSignal,
+        resolve,
+        reject,
+      } = data;
+      const executionContext = (
+        data as ToolExecuteBatchRequest & { executionContext?: SubagentExecutionContext }
+      ).executionContext;
+      // Only the SDK-owned batch field may establish a child execution. Runtime
+      // configurable and callback metadata can otherwise carry inherited values.
+      const configurable: Record<string, unknown> | undefined =
+        incomingConfigurable == null ? undefined : { ...incomingConfigurable, executionContext };
+      const metadata: Record<string, unknown> | undefined =
+        incomingMetadata == null && executionContext == null
+          ? undefined
+          : { ...incomingMetadata, executionContext };
+      let eventRunId: string | undefined;
+      if (typeof metadata?.run_id === 'string') {
+        eventRunId = metadata.run_id;
+      } else if (typeof configurable?.run_id === 'string') {
+        eventRunId = configurable.run_id;
+      }
+      const foregroundHostSignal =
+        eventRunId == null || eventRunId === foregroundRunId ? hostRunSignal : undefined;
+      const runSignal =
+        foregroundHostSignal != null &&
+        eventRunSignal != null &&
+        foregroundHostSignal !== eventRunSignal
+          ? AbortSignal.any([foregroundHostSignal, eventRunSignal])
+          : (foregroundHostSignal ?? eventRunSignal);
       const callerCapabilityProjection = resolveCallerCapabilityProjectionSnapshot(
         (
           data as ToolExecuteBatchRequest & {
@@ -4465,11 +5351,28 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
               return;
             }
             const toolNames = [...new Set(allowedToolCalls.map((tc) => tc.name))];
+
+            const runFileSharingActive = runFiles?.isActive() === true;
+            if (runFileSharingActive) {
+              if (!agentId) throw new Error('Shared-file tools require an executing agent.');
+              await runFiles!.prepareTools(
+                agentId,
+                executionContext,
+                runSignal ?? new AbortController().signal,
+                toolNames.some(isFileResourceToolName) ? 'refresh' : 'snapshot',
+              );
+            }
+            const provisionedCodeFiles = provisionFiles
+              ? await provisionFiles(toolNames, agentId, runSignal, executionContext)
+              : undefined;
+
             const { loadedTools, configurable: toolConfigurable } = await loadTools(
               toolNames,
               agentId,
               sourceConfigurable,
               callerCapabilityProjection,
+              runSignal,
+              executionContext,
             );
             const toolMap = new Map(loadedTools.map((t) => [t.name, t]));
             const loadedConfigurable = toolConfigurable as Record<string, unknown> | undefined;
@@ -4477,8 +5380,47 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
               sourceConfigurable,
               loadedConfigurable,
             );
+            if (mergedConfigurable != null) mergedConfigurable.executionContext = executionContext;
+            /* The graph populated each call's code-session context from the sessions that
+             * existed at run start, before this batch provisioned anything, and nothing
+             * downstream refreshes it. buildToolCallConfig reads `_injected_files` from
+             * that context alone, so without this fold a successful upload still reaches
+             * a sandbox that cannot see the file. */
+            if (provisionedCodeFiles && provisionedCodeFiles.length > 0) {
+              for (const tc of allowedToolCalls) {
+                if (
+                  !isCodeSessionAwareToolCall(tc.name, mergedConfigurable) &&
+                  !(runFileSharingActive && isCodeFileToolName(tc.name))
+                ) {
+                  continue;
+                }
+                const merged = mergeCodeFilesIntoContext(
+                  tc.codeSessionContext as CodeSessionContext | undefined,
+                  provisionedCodeFiles,
+                );
+                if (merged) {
+                  tc.codeSessionContext = merged;
+                }
+              }
+            }
+
             const codeExecutionContext = getCodeExecutionContext(mergedConfigurable);
             const runtimeSessionHint = codeExecutionContext?.runtimeSessionHint;
+            if (runFileSharingActive && executionContext != null) {
+              for (const tc of allowedToolCalls) {
+                if (
+                  !isCodeSessionAwareToolCall(tc.name, mergedConfigurable) &&
+                  !isCodeFileToolName(tc.name)
+                )
+                  continue;
+                if (!runtimeSessionHint || codeExecutionContext?.environmentType === 'attached') {
+                  throw new Error('This child execution has no isolated file workspace.');
+                }
+                // SDK tool configs may still carry a parent's runtime hint. The
+                // host prepared this partition using the authorized child identity.
+                tc.runtimeSessionHint = runtimeSessionHint;
+              }
+            }
             const executionRouteKey =
               codeExecutionContext?.executionRouteKey ?? codeExecutionContext?.executionProfile;
             const sandboxConversationId =
@@ -4664,12 +5606,24 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                   }),
                 };
               }
+              const backgroundAbortController = new AbortController();
+              let backgroundAbortSource: 'manual' | 'timeout' | undefined;
               const created = backgroundTaskRegistry.create({
                 ...(detachedReservation?.status === 'reserved'
                   ? { taskId: detachedReservation.taskId }
                   : {}),
                 ...registration,
                 ...(capacityPermit == null ? {} : { capacityPermit }),
+                requestCancellation: () => {
+                  if (backgroundAbortSource != null || backgroundAbortController.signal.aborted) {
+                    return false;
+                  }
+                  backgroundAbortSource = 'manual';
+                  backgroundAbortController.abort(
+                    new DOMException('Background task cancellation requested', 'AbortError'),
+                  );
+                  return true;
+                },
               });
               if ('atCapacity' in created) {
                 if (detachedReservation?.status === 'reserved') {
@@ -4735,7 +5689,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                 const persistBackgroundResult = async (params: {
                   output?: string;
                   artifact?: unknown;
-                  status: 'completed' | 'error';
+                  status: 'completed' | 'error' | 'cancelled';
                 }): Promise<void> => {
                   /** A provider id alone is not a durable part identity: it may
                    * repeat in later turns of the same response. New automatic
@@ -4758,7 +5712,8 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                     return {
                       taskId: task.id,
                       toolName: tc.name,
-                      status: params.status,
+                      status: params.status === 'cancelled' ? 'error' : params.status,
+                      ...(params.status === 'cancelled' ? { cancelled: true } : {}),
                       settledAt: new Date(current?.updatedAt ?? Date.now()),
                       ...(completionPreregistered ? { completionWakeup: true } : {}),
                       ...(current?.resultClaim != null
@@ -4767,6 +5722,9 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                               kind: current.resultClaim.kind,
                               claimId: current.resultClaim.claimId,
                               claimedAt: new Date(current.resultClaim.claimedAt),
+                              ...(current.resultClaim.generationId == null
+                                ? {}
+                                : { generationId: current.resultClaim.generationId }),
                             },
                           }
                         : {}),
@@ -4801,6 +5759,23 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                         certainty === 'ambiguous' ? { onlyIfUnclaimed: true } : undefined,
                       );
                       if (!retired) {
+                        const current = backgroundTaskRegistry.get(
+                          backgroundUserId,
+                          backgroundConversationId,
+                          task.id,
+                        );
+                        /** A prior manual poll may already have durably retired
+                         * this exact unclaimed delivery. In that case there is
+                         * no automatic consumer left to race the process-local
+                         * fallback, even though a second retirement is a no-op. */
+                        if (current?.completionWakeupRetired === true) {
+                          backgroundTaskRegistry.markCompletionPersistenceFailed(
+                            backgroundUserId,
+                            backgroundConversationId,
+                            task.id,
+                          );
+                          return;
+                        }
                         logger.warn(
                           `[background] Could not retire failed completion delivery for task ${task.id}.`,
                         );
@@ -4871,7 +5846,8 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                        *  overwrite it. */
                       dispatchedAt: task.createdAt,
                       codeExecutionContext,
-                      ...(detachedReservation?.status === 'reserved' || !completionPreregistered
+                      ...(detachedReservation?.status === 'reserved' ||
+                      (!completionPreregistered && params.status !== 'cancelled')
                         ? {}
                         : { backgroundTask, resolveBackgroundTask }),
                       output: params.output ?? localTask?.result,
@@ -4944,7 +5920,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                 const persistSettledBackgroundResult = async (params: {
                   output?: string;
                   artifact?: unknown;
-                  status: 'completed' | 'error';
+                  status: 'completed' | 'error' | 'cancelled';
                 }): Promise<void> => {
                   if (harvestEnabled) {
                     await persistBackgroundResult(params);
@@ -4966,7 +5942,6 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                   }
                 };
                 let invokePromise: Promise<{ content?: unknown; artifact?: unknown }>;
-                const backgroundAbortController = new AbortController();
                 try {
                   invokePromise = Promise.resolve(
                     tool.invoke(normalizedArgs, {
@@ -5094,6 +6069,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                 };
                 let producerRetirementTimeout: ReturnType<typeof setTimeout> | undefined;
                 const requestBackgroundAbort = (): void => {
+                  backgroundAbortSource ??= 'timeout';
                   backgroundAbortController.abort(
                     new DOMException('Background task timed out', 'AbortError'),
                   );
@@ -5222,17 +6198,21 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                       policyError == null
                         ? filteredToolOutputResult(tc, backgroundReq, {
                             errorMessage: errorOutput,
+                            upstreamBody:
+                              toolError instanceof WorkspaceToolHttpError
+                                ? toolError.upstreamBody
+                                : undefined,
                           })
                         : null;
                     const neutralizedError = filteredError?.errorMessage ?? errorOutput;
                     const deliveredError = toBackgroundToolFailure(tc.name, neutralizedError);
                     const registryError = isCodeCall ? deliveredError : neutralizedError;
+                    /** Only an owner-authorized request is cancellation evidence.
+                     * Providers and timeout controllers also use AbortError, so
+                     * classifying by error shape would turn failures into a false
+                     * claim that the owner cancelled the task. */
                     const detachedTerminalStatus =
-                      toolError instanceof Error &&
-                      (toolError.name === 'AbortError' ||
-                        (toolError as Error & { code?: string }).code === 'ABORT_ERR')
-                        ? 'cancelled'
-                        : 'failed';
+                      backgroundAbortSource === 'manual' ? 'cancelled' : 'failed';
                     if (
                       !(await persistDetachedTerminal({
                         status: detachedTerminalStatus,
@@ -5241,19 +6221,30 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                     ) {
                       return;
                     }
-                    backgroundTaskRegistry.fail(
-                      backgroundUserId,
-                      backgroundConversationId,
-                      task.id,
-                      registryError,
-                      /** Failed code tasks join the heal path too: without this,
-                       *  a full-row save reverting the error patch would leave
-                       *  the dispatch card on the handle JSON forever. */
-                      { harvestStarted: harvestEnabled },
-                    );
+                    const settleOptions = { harvestStarted: harvestEnabled };
+                    if (detachedTerminalStatus === 'cancelled') {
+                      backgroundTaskRegistry.cancel(
+                        backgroundUserId,
+                        backgroundConversationId,
+                        task.id,
+                        registryError,
+                        settleOptions,
+                      );
+                    } else {
+                      backgroundTaskRegistry.fail(
+                        backgroundUserId,
+                        backgroundConversationId,
+                        task.id,
+                        registryError,
+                        /** Failed code tasks join the heal path too: without this,
+                         *  a full-row save reverting the error patch would leave
+                         *  the dispatch card on the handle JSON forever. */
+                        settleOptions,
+                      );
+                    }
                     await persistSettledBackgroundResult({
                       output: deliveredError,
-                      status: 'error',
+                      status: detachedTerminalStatus === 'cancelled' ? 'cancelled' : 'error',
                     });
                     await wakeDetachedActor();
                   } finally {
@@ -5284,6 +6275,10 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
               };
             };
 
+            const batchReq = mergedConfigurable?.req as ServerRequest | undefined;
+            const batchCodeApiRateLimitBudget = createCodeApiRateLimitBudget(
+              batchReq?.config?.endpoints?.agents?.codeApiMaxRetryWaitMs,
+            );
             const results: ToolExecuteResult[] = await Promise.all(
               toolCalls.map(async (tc: ToolCallRequest) => {
                 const preloadedNameBlock = preloadedNameBlocks.get(tc);
@@ -5315,9 +6310,11 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                     toolCallId: tc.id,
                     agentId,
                     runId: `${backgroundRunId ?? ''}:${tc.turn ?? ''}`,
+                    generationId: backgroundRunId,
                     subagentTasks,
                     claimBackgroundToolResult: backgroundToolCompletion?.claim,
                     recoverDeadBackgroundToolClaim: backgroundToolCompletion?.recoverDeadClaim,
+                    ordinaryToolCancellation,
                   });
                   const taskSnapshot = getBackgroundTaskSnapshot({
                     userId: backgroundUserId,
@@ -5391,6 +6388,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           {
                             ...(metadata ?? {}),
                             executingAgentId: agentId,
+                            stepId: tc.stepId,
                           } as ToolEndCallbackMetadata,
                         );
                       } catch (callbackError) {
@@ -5484,12 +6482,12 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                       }
                     }
                     if (persistBackgroundCodeResult && delivery.messageId) {
-                      /** Error tasks carry their message in `error`, not
+                      /** Error/cancelled tasks carry their message in `error`, not
                        *  `result`; abort-confirmed timeouts store it raw, so
                        *  wrap here — `toBackgroundToolFailure` is a no-op for
                        *  already-wrapped detached failures. */
                       const reapplyOutput =
-                        delivery.status === 'error'
+                        delivery.status === 'error' || delivery.status === 'cancelled'
                           ? toBackgroundToolFailure(
                               delivery.toolName,
                               delivery.error ?? delivery.result ?? 'Background task failed',
@@ -5504,6 +6502,9 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                         agentId: delivery.agentId,
                         output: reapplyOutput,
                         attachments: delivery.attachments,
+                        ...(delivery.backgroundTask == null
+                          ? {}
+                          : { backgroundTask: delivery.backgroundTask }),
                         reapply: true,
                       }).catch((reapplyError) => {
                         logger.warn(
@@ -5519,6 +6520,15 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                     content: pollContent,
                     ...(codeSessionArtifact != null ? { artifact: codeSessionArtifact } : {}),
                   });
+                }
+
+                const usesCodeFiles =
+                  isCodeFileToolName(tc.name) ||
+                  isCodeSessionAwareToolCall(tc.name, mergedConfigurable);
+                if (runFileSharingActive && usesCodeFiles && isBackgroundRequested(tc.args)) {
+                  return reportResult(
+                    errorResult(tc, 'Shared-file code tools require foreground execution.'),
+                  );
                 }
 
                 if (
@@ -5552,6 +6562,8 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                   if (
                     tc.name === Constants.SKILL_TOOL ||
                     tc.name === Constants.READ_FILE ||
+                    tc.name === SEARCH_WORKSPACE_TOOL_NAME ||
+                    tc.name === LIST_WORKSPACE_FILES_TOOL_NAME ||
                     isFileAuthoringCall
                   ) {
                     const req = mergedConfigurable?.req as ServerRequest | undefined;
@@ -5568,6 +6580,8 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           options,
                           agentId,
                           req,
+                          runSignal,
+                          batchCodeApiRateLimitBudget,
                         );
                       } else if (tc.name === Constants.READ_FILE) {
                         handlerResult = await handleReadFileCall(
@@ -5578,6 +6592,23 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           () => {
                             sandboxReadSucceeded = true;
                           },
+                          runSignal,
+                        );
+                      } else if (tc.name === SEARCH_WORKSPACE_TOOL_NAME) {
+                        handlerResult = await handleWorkspaceSearchCall(
+                          tc,
+                          mergedConfigurable,
+                          options,
+                          req,
+                          runSignal,
+                        );
+                      } else if (tc.name === LIST_WORKSPACE_FILES_TOOL_NAME) {
+                        handlerResult = await handleWorkspaceListCall(
+                          tc,
+                          mergedConfigurable,
+                          options,
+                          req,
+                          runSignal,
                         );
                       } else if (tc.name === CREATE_FILE_TOOL_NAME && isFileAuthoringCall) {
                         handlerResult = await handleCreateFileCall(
@@ -5587,6 +6618,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           req,
                           sourceConfigurable,
                           sandboxContext,
+                          runSignal,
                         );
                       } else if (tc.name === EDIT_FILE_TOOL_NAME && isFileAuthoringCall) {
                         handlerResult = await handleEditFileCall(
@@ -5595,6 +6627,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                           options,
                           req,
                           sandboxContext,
+                          runSignal,
                         );
                       } else {
                         handlerResult = errorResult(tc, `Tool ${tc.name} not found`);
@@ -5610,6 +6643,10 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                       const { message, logContext } = getSafeToolError(toolError);
                       const filteredError = filteredToolOutputResult(tc, req, {
                         errorMessage: message,
+                        upstreamBody:
+                          toolError instanceof WorkspaceToolHttpError
+                            ? toolError.upstreamBody
+                            : undefined,
                       });
                       if (filteredError != null) {
                         logger.error(`[ON_TOOL_EXECUTE] Tool ${tc.name} error`, {
@@ -5618,10 +6655,18 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                         });
                         return filteredError;
                       }
-                      logger.error(`[ON_TOOL_EXECUTE] Tool ${tc.name} error`, {
+                      const context = {
                         ...logContext,
                         toolCallArgsShape: getValueShape(tc.args),
-                      });
+                      };
+                      if (runSignal?.aborted === true && isAbortError(toolError)) {
+                        logger.debug(
+                          `[ON_TOOL_EXECUTE] Tool ${tc.name} cancelled by run abort`,
+                          context,
+                        );
+                      } else {
+                        logger.error(`[ON_TOOL_EXECUTE] Tool ${tc.name} error`, context);
+                      }
                       return {
                         toolCallId: tc.id,
                         status: 'error' as const,
@@ -5684,6 +6729,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                               | undefined,
                             ...metadata,
                             executingAgentId: agentId,
+                            stepId: tc.stepId,
                             codeExecutionContext,
                           },
                         );
@@ -5884,6 +6930,13 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                       toolCall: toolCallConfig,
                       configurable: mergedConfigurable,
                       metadata,
+                      /** The run's cancellation signal. Without it a foreground
+                       *  tool call keeps running after Stop: an MCP call never
+                       *  sends `notifications/cancelled`, and every other
+                       *  signal-aware tool keeps burning quota on a turn the
+                       *  user already abandoned. Detached background calls
+                       *  intentionally use their own controller instead. */
+                      ...(runSignal != null && { signal: runSignal }),
                     } as Record<string, unknown>);
 
                     /* Only sandbox-bound calls carry a runtime session hint, so
@@ -5961,6 +7014,7 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                             | undefined,
                           ...metadata,
                           executingAgentId: agentId,
+                          stepId: tc.stepId,
                           codeExecutionContext,
                         },
                       );
@@ -5981,18 +7035,39 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                       return errorResult(tc, modelBoundContentFilterErrorMessage(toolError.body));
                     }
                     const { message, logContext } = getSafeToolError(toolError);
+                    /** A user Stop rejects every in-flight call at once. That is
+                     *  the abort working, not a fault, so it is logged at debug.
+                     *  An aborted run says the turn is over, not that THIS
+                     *  rejection was the cancellation, so the error must look
+                     *  like one too; an unrelated failure racing the Stop stays
+                     *  at error level. Either way the level is all that changes
+                     *  — filtering and the result shape are identical. */
+                    const logToolFailure = (context: Record<string, unknown>): void => {
+                      if (runSignal?.aborted === true && isAbortError(toolError)) {
+                        logger.debug(
+                          `[ON_TOOL_EXECUTE] Tool ${tc.name} cancelled by run abort`,
+                          context,
+                        );
+                        return;
+                      }
+                      logger.error(`[ON_TOOL_EXECUTE] Tool ${tc.name} error`, context);
+                    };
                     const req = mergedConfigurable?.req as ServerRequest | undefined;
                     const filteredError = filteredToolOutputResult(tc, req, {
                       errorMessage: message,
+                      upstreamBody:
+                        toolError instanceof WorkspaceToolHttpError
+                          ? toolError.upstreamBody
+                          : undefined,
                     });
                     if (filteredError != null) {
-                      logger.error(`[ON_TOOL_EXECUTE] Tool ${tc.name} error`, {
+                      logToolFailure({
                         name: logContext.name,
                         contentFiltered: true,
                       });
                       return filteredError;
                     }
-                    logger.error(`[ON_TOOL_EXECUTE] Tool ${tc.name} error`, {
+                    logToolFailure({
                       ...logContext,
                       toolCallArgsShape: getValueShape(tc.args),
                       toolInputSchemaKind: getToolInputSchemaKind(tool),
@@ -6006,9 +7081,18 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                   }
                 };
 
+                const executeWithFileScope = (sandboxContext?: SandboxSessionContext) =>
+                  runFileSharingActive && usesCodeFiles && runFiles != null && agentId != null
+                    ? runFiles.withCodeExecution(
+                        agentId,
+                        executionContext,
+                        runSignal ?? new AbortController().signal,
+                        () => execute(sandboxContext),
+                      )
+                    : execute(sandboxContext);
                 const queueKey = getFileAuthoringQueueKey(tc, mergedConfigurable);
                 if (!queueKey) {
-                  return reportResult(await execute());
+                  return reportResult(await executeWithFileScope());
                 }
                 let sandboxContext: SandboxSessionContext | undefined;
                 if (queueKey.startsWith('sandbox:')) {
@@ -6019,8 +7103,8 @@ export function createToolExecuteHandler(options: ToolExecuteOptions): EventHand
                 }
                 const previous = authoringQueues.get(queueKey) ?? Promise.resolve();
                 const resultPromise = previous.then(
-                  () => execute(sandboxContext),
-                  () => execute(sandboxContext),
+                  () => executeWithFileScope(sandboxContext),
+                  () => executeWithFileScope(sandboxContext),
                 );
                 authoringQueues.set(
                   queueKey,

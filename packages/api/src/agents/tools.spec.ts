@@ -6,6 +6,7 @@
  */
 jest.mock('@librechat/agents', () => ({
   CODE_EXECUTION_TOOLS: new Set(['execute_code', 'bash_tool']),
+  Constants: { READ_FILE: 'read_file', WRITE_FILE: 'write_file' },
   ReadFileToolDefinition: {
     name: 'read_file',
     description: 'read skill files using {skillName}/{filePath} and SKILL.md',
@@ -23,8 +24,16 @@ jest.mock('@librechat/agents', () => ({
   BashExecutionToolDefinition: {
     name: 'bash_tool',
     description: 'bash',
-    schema: { type: 'object', properties: {} },
+    schema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        args: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['command'],
+    },
   },
+  BashToolOutputReferencesGuide: '{{tool<idx>turn<turn>}}',
   /**
    * Deterministic stub mirroring the SDK's `buildBashExecutionToolDescription`:
    * appends an LLM-facing reference-syntax marker only when
@@ -40,7 +49,7 @@ jest.mock('@librechat/agents', () => ({
 
 import { CODE_EXECUTION_TOOLS } from '@librechat/agents';
 import type { LCTool, LCToolRegistry } from '@librechat/agents';
-import { Constants } from 'librechat-data-provider';
+import { CODE_WORKSPACE_OPERATIONS, Constants } from 'librechat-data-provider';
 import {
   buildToolSet,
   buildRunToolSet,
@@ -313,6 +322,8 @@ describe('buildHistoricalToolNames', () => {
         'read_file',
         'create_file',
         'edit_file',
+        'search_workspace',
+        'list_workspace_files',
         'set_memory',
         'delete_memory',
         'skill',
@@ -474,6 +485,119 @@ describe('registerCodeExecutionTools', () => {
       expect(JSON.stringify(readFile?.parameters)).not.toContain('{skillName}');
     });
 
+    it('advertises explicit workspace paths and pagination for attached environments', () => {
+      const result = registerCodeExecutionTools({
+        toolRegistry: makeRegistry(),
+        toolDefinitions: [],
+        includeBash: true,
+        includeSkillFileInstructions: false,
+        workspaceTools: true,
+        workspaceOperations: new Set(CODE_WORKSPACE_OPERATIONS),
+      });
+
+      const readFile = result.toolDefinitions.find((definition) => definition.name === 'read_file');
+      const bashTool = result.toolDefinitions.find((definition) => definition.name === 'bash_tool');
+      const searchWorkspace = result.toolDefinitions.find(
+        (definition) => definition.name === 'search_workspace',
+      );
+      const listWorkspaceFiles = result.toolDefinitions.find(
+        (definition) => definition.name === 'list_workspace_files',
+      );
+      expect(readFile?.description).toContain('workspace/');
+      expect(readFile?.description).toContain('attached');
+      expect(readFile?.parameters).toMatchObject({
+        properties: {
+          start_line: { type: 'integer' },
+          max_lines: { type: 'integer', maximum: 500 },
+        },
+      });
+      expect(bashTool?.description).toContain('selected attached environment');
+      expect(bashTool?.description).toContain('empty directory');
+      expect(bashTool?.description).toContain('Network access follows the sandbox policy');
+      expect(bashTool?.description).not.toContain('/mnt/data');
+      expect(bashTool?.parameters).toMatchObject({
+        properties: {
+          command: { type: 'string' },
+          args: { type: 'array' },
+          cwd: { type: 'string', maxLength: 4096 },
+          timeoutMs: { type: 'integer', minimum: 1, maximum: 30000 },
+        },
+        required: ['command'],
+      });
+      expect(searchWorkspace).toMatchObject({
+        name: 'search_workspace',
+        parameters: {
+          properties: {
+            query: { type: 'string' },
+            path: { type: 'string' },
+            max_results: { type: 'integer', maximum: 200 },
+          },
+          required: ['query'],
+        },
+      });
+      expect(searchWorkspace?.description).toContain('literal text');
+      expect(listWorkspaceFiles).toMatchObject({
+        name: 'list_workspace_files',
+        parameters: {
+          properties: {
+            path: { type: 'string' },
+            max_results: { type: 'integer', maximum: 500 },
+            after_path: { type: 'string' },
+          },
+        },
+      });
+      expect(listWorkspaceFiles?.description).toContain('empty directory');
+      expect(listWorkspaceFiles?.description).toContain('after_path');
+      expect(filePathDescription(listWorkspaceFiles)).toContain('canonical relative');
+    });
+
+    it('advertises the configured attached-command timeout ceiling', () => {
+      const result = registerCodeExecutionTools({
+        toolRegistry: makeRegistry(),
+        toolDefinitions: [],
+        includeBash: true,
+        workspaceTools: true,
+        workspaceOperations: new Set(['execute_command'] as const),
+        workspaceCommandTimeoutMaxMs: 120_000,
+      });
+
+      expect(
+        result.toolDefinitions.find((definition) => definition.name === 'bash_tool'),
+      ).toMatchObject({
+        parameters: {
+          properties: { timeoutMs: { minimum: 1, maximum: 120_000 } },
+        },
+      });
+    });
+
+    it('registers only operations advertised by the selected workspace', () => {
+      const result = registerCodeExecutionTools({
+        toolRegistry: makeRegistry(),
+        toolDefinitions: [],
+        includeBash: true,
+        includeSkillFileInstructions: false,
+        workspaceTools: true,
+        workspaceOperations: new Set(['read_file', 'list_files']),
+      });
+
+      expect(result.toolDefinitions.map(({ name }) => name).sort()).toEqual([
+        'list_workspace_files',
+        'read_file',
+      ]);
+    });
+
+    it('fails closed when attached workspace operations were not validated', () => {
+      const result = registerCodeExecutionTools({
+        toolRegistry: makeRegistry(),
+        toolDefinitions: [],
+        includeBash: true,
+        includeSkillFileInstructions: false,
+        workspaceTools: true,
+      });
+
+      expect(result.toolDefinitions).toEqual([]);
+    });
+
     it('upgrades a code-only read_file definition when skills are enabled later in the run', () => {
       const toolRegistry = makeRegistry();
       const codeOnly = registerCodeExecutionTools({
@@ -495,6 +619,35 @@ describe('registerCodeExecutionTools', () => {
       expect(readFile?.description).toContain('skills/{skillName}/');
       expect(readFile?.description).toContain('SKILL.md');
       expect(toolRegistry.get('read_file')?.description).toBe(readFile?.description);
+    });
+
+    it('preserves attached workspace instructions when skills upgrade read_file', () => {
+      const toolRegistry = makeRegistry();
+      const codeOnly = registerCodeExecutionTools({
+        toolRegistry,
+        toolDefinitions: [],
+        includeBash: true,
+        includeSkillFileInstructions: false,
+        workspaceTools: true,
+        workspaceOperations: new Set(CODE_WORKSPACE_OPERATIONS),
+      });
+      const upgraded = registerCodeExecutionTools({
+        toolRegistry,
+        toolDefinitions: codeOnly.toolDefinitions,
+        includeBash: false,
+        includeSkillFileInstructions: true,
+        workspaceTools: true,
+        workspaceOperations: new Set(CODE_WORKSPACE_OPERATIONS),
+      });
+
+      const readFile = upgraded.toolDefinitions.find(
+        (definition) => definition.name === 'read_file',
+      );
+      expect(readFile?.description).toContain('skills/{skillName}/');
+      expect(readFile?.description).toContain('workspace/');
+      expect(readFile?.parameters).toMatchObject({
+        properties: { max_lines: { maximum: 500 } },
+      });
     });
 
     it('preserves pre-existing unrelated tool definitions', () => {
@@ -706,6 +859,8 @@ describe('registerFileAuthoringTools', () => {
 
   it('recognizes host-side file authoring tools as code-session-aware without mutating the shared set', () => {
     expect(isCodeSessionToolName('bash_tool')).toBe(true);
+    expect(isCodeSessionToolName('search_workspace')).toBe(true);
+    expect(isCodeSessionToolName('list_workspace_files')).toBe(true);
     expect(isCodeSessionToolName('create_file')).toBe(false);
     expect(isCodeSessionToolName('edit_file')).toBe(false);
     expect(isCodeSessionToolName('create_file', FILE_AUTHORING_TOOL_NAMES)).toBe(true);
@@ -768,6 +923,49 @@ describe('registerFileAuthoringTools', () => {
     expect(filePathDescription(editFile)).not.toContain('rename skills');
   });
 
+  it('registers attached-workspace paths and atomic edit semantics', () => {
+    const result = registerFileAuthoringTools({
+      toolRegistry: makeRegistry(),
+      toolDefinitions: [],
+      includeSkillFileInstructions: false,
+      workspaceTools: true,
+      workspaceOperations: new Set(CODE_WORKSPACE_OPERATIONS),
+    });
+    const createFile = result.toolDefinitions.find((d) => d.name === 'create_file');
+    const editFile = result.toolDefinitions.find((d) => d.name === 'edit_file');
+
+    expect(createFile?.description).toContain('workspace/{relativePath}');
+    expect(createFile?.description).not.toContain('/mnt/data/');
+    expect(editFile?.description).toContain('entire batch commits atomically');
+    expect(filePathDescription(createFile)).toContain('workspace/{relativePath}');
+    expect(filePathDescription(editFile)).toContain('workspace/{relativePath}');
+    expect(isFileAuthoringToolDefinition(createFile)).toBe(true);
+    expect(isFileAuthoringToolDefinition(editFile)).toBe(true);
+  });
+
+  it('registers only authoring operations advertised by the selected workspace', () => {
+    const result = registerFileAuthoringTools({
+      toolRegistry: makeRegistry(),
+      toolDefinitions: [],
+      includeSkillFileInstructions: false,
+      workspaceTools: true,
+      workspaceOperations: new Set(['edit_file']),
+    });
+
+    expect(result.toolDefinitions.map(({ name }) => name)).toEqual(['edit_file']);
+  });
+
+  it('fails closed when attached authoring operations were not validated', () => {
+    const result = registerFileAuthoringTools({
+      toolRegistry: makeRegistry(),
+      toolDefinitions: [],
+      includeSkillFileInstructions: false,
+      workspaceTools: true,
+    });
+
+    expect(result.toolDefinitions).toEqual([]);
+  });
+
   it('is idempotent across repeated registration calls', () => {
     const toolRegistry = makeRegistry();
     const first = registerFileAuthoringTools({
@@ -795,7 +993,6 @@ describe('registerFileAuthoringTools', () => {
       toolDefinitions: codeOnly.toolDefinitions,
       includeSkillFileInstructions: true,
     });
-
     expect(upgraded.registered).toEqual([]);
     expect(upgraded.toolDefinitions.find((d) => d.name === 'create_file')?.description).toContain(
       'skills/',
@@ -820,12 +1017,20 @@ describe('registerFileAuthoringTools', () => {
       toolDefinitions: codeOnly.toolDefinitions,
       includeSkillFileInstructions: true,
     });
+    const attached = registerFileAuthoringTools({
+      toolRegistry: makeRegistry(),
+      toolDefinitions: [],
+      includeSkillFileInstructions: true,
+      workspaceTools: true,
+      workspaceOperations: new Set(CODE_WORKSPACE_OPERATIONS),
+    });
 
     expect(
       maxToolDescriptionLength([
         ...skillAware.toolDefinitions,
         ...codeOnly.toolDefinitions,
         ...upgraded.toolDefinitions,
+        ...attached.toolDefinitions,
       ]),
     ).toBeLessThanOrEqual(TOOL_DESCRIPTION_ADVISORY_MAX_LENGTH);
   });
