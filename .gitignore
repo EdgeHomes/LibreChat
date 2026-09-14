@@ -79,6 +79,11 @@ api/tsconfig.json
 #config file
 librechat.yaml
 librechat.yml
+litellm.yaml
+librechat.test.yaml
+librechat.production.yaml
+docker-compose.test.yml
+docker-compose.production.yml
 
 # Environment
 .env*
