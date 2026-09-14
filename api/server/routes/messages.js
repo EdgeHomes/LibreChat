@@ -22,9 +22,11 @@ const {
   assertStoredMessageMutationAllowed,
   assertChatMutationAllowed,
   assertStoredMessageBranchAllowed,
+  reportLocatorTraversalFailure,
   mergeUserSubmittedPaths,
   mergeUserSubmittedMessageFieldPaths,
   isContentFilterError,
+  withoutTraceRefs,
 } = require('@librechat/api');
 const subagentThreadTaskStore = require('~/server/services/Endpoints/agents/subagentThreadStore');
 const { findAllArtifacts, replaceArtifactContent } = require('~/server/services/Artifacts/update');
@@ -40,6 +42,8 @@ const db = require('~/models');
 
 const router = express.Router();
 const filterStoredMessageContent = createContentFilter({
+  messageCount: 1,
+  onTraversalFailure: reportLocatorTraversalFailure,
   getFilters: (req) => req.config?.filters,
   getMessageRoles: (req) => [req.body?.role],
   getOpaqueFileInput: (req) => req.body,
@@ -47,6 +51,7 @@ const filterStoredMessageContent = createContentFilter({
   extract: (req) => extractStoredMessageContent(req.body),
 });
 const filterFeedbackContent = createContentFilter({
+  onTraversalFailure: reportLocatorTraversalFailure,
   getFilters: (req) => req.config?.filters,
   extract: (req) => extractFeedbackContent(req.body),
 });
@@ -61,7 +66,14 @@ router.use(requireJwtAuth);
 
 async function rejectSubagentThreadWrite(req, res, conversationId) {
   const blocked = await isSubagentThreadWriteBlocked(
-    { getConvo: db.getConvo, store: subagentThreadTaskStore },
+    {
+      getConvo: async (...args) => {
+        const conversation = await db.getConvo(...args);
+        req.resolvedConversation = conversation;
+        return conversation;
+      },
+      store: subagentThreadTaskStore,
+    },
     {
       userId: req.user.id,
       conversationId,
@@ -101,11 +113,12 @@ router.get('/', async (req, res) => {
     let scopedMessageRead;
     if (typeof conversationId === 'string') {
       const ownershipRead = db.getConvoOwnership(user, conversationId);
+      /** Client-facing reads never expose server-private fields such as `contextMeta`. */
       const messageRead = messageId
-        ? db.getMessages({ conversationId, messageId, user })
+        ? db.getMessages({ conversationId, messageId, user }, CLIENT_MESSAGE_SELECT)
         : db.getMessagesByCursor(
             { conversationId, user },
-            { sortField, sortOrder, limit: pageSize, cursor },
+            { sortField, sortOrder, limit: pageSize, cursor, select: CLIENT_MESSAGE_SELECT },
           );
       scopedMessageRead = Promise.resolve(messageRead).then(
         (value) => ({ ok: true, value }),
@@ -161,10 +174,13 @@ router.get('/', async (req, res) => {
         }
       }
 
-      const dbMessages = await db.getMessages({
-        user,
-        messageId: { $in: messageIds },
-      });
+      const dbMessages = await db.getMessages(
+        {
+          user,
+          messageId: { $in: messageIds },
+        },
+        CLIENT_MESSAGE_SELECT,
+      );
 
       const dbMessageMap = {};
       for (const dbMessage of dbMessages) {
@@ -175,9 +191,12 @@ router.get('/', async (req, res) => {
       for (const message of cleanedMessages) {
         const convo = result.convoMap[message.conversationId];
         const dbMessage = dbMessageMap[message.messageId];
+        /** Search hydrates every schema field; server-private state never leaves. */
+        const publicHit = { ...message };
+        delete publicHit.contextMeta;
 
         activeMessages.push({
-          ...message,
+          ...publicHit,
           title: convo.title,
           conversationId: message.conversationId,
           model: convo.model,
@@ -209,6 +228,18 @@ router.get('/', async (req, res) => {
  * @param {string} req.body.agentId - The agentId to filter content by
  * @returns {TMessage} The newly created branch message
  */
+/**
+ * Projects a saved row for a client response. The context meta stays in the
+ * database for the next turn; no client-facing read or write response carries it.
+ * @param {TMessage} message
+ * @returns {TMessage}
+ */
+function toClientMessage(message) {
+  const clientMessage = { ...message };
+  delete clientMessage.contextMeta;
+  return clientMessage;
+}
+
 router.post('/branch', configMiddleware, async (req, res) => {
   try {
     const { messageId, agentId } = req.body;
@@ -298,6 +329,9 @@ router.post('/branch', configMiddleware, async (req, res) => {
       endpoint: sourceMessage.endpoint,
       sender: sourceMessage.sender,
       iconURL: sourceMessage.iconURL,
+      // Server-private context meta (calibration and fading tier) travels with the branch so
+      // the next turn seeds its pruner the same way it would from the source response.
+      ...(sourceMessage.contextMeta != null && { contextMeta: sourceMessage.contextMeta }),
       ...(typeof sourceMessage.isUserSubmitted === 'boolean' && {
         isUserSubmitted: sourceMessage.isUserSubmitted,
       }),
@@ -322,13 +356,14 @@ router.post('/branch', configMiddleware, async (req, res) => {
         message: newMessage,
         user: req.user,
       },
-      { getFiles: db.getFiles },
+      { getFiles: db.getFiles, onTraversalFailure: reportLocatorTraversalFailure },
     );
 
     const savedMessage = await db.saveMessage(
       {
         userId: req?.user?.id,
-        isTemporary: req?.body?.isTemporary,
+        isTemporary: sourceMessage.isTemporary,
+        expiredAt: sourceMessage.expiredAt,
         interfaceConfig: req?.config?.interfaceConfig,
       },
       newMessage,
@@ -339,7 +374,7 @@ router.post('/branch', configMiddleware, async (req, res) => {
       return res.status(500).json({ error: 'Failed to save branch message' });
     }
 
-    res.status(201).json(savedMessage);
+    res.status(201).json(toClientMessage(savedMessage));
   } catch (error) {
     if (isContentFilterError(error)) {
       return res.status(error.statusCode).json(error.body);
@@ -418,7 +453,8 @@ router.post('/artifact/:messageId', configMiddleware, async (req, res) => {
     const savedMessage = await db.saveMessage(
       {
         userId: req?.user?.id,
-        isTemporary: req?.body?.isTemporary,
+        isTemporary: message.isTemporary,
+        expiredAt: message.expiredAt,
         interfaceConfig: req?.config?.interfaceConfig,
       },
       {
@@ -487,13 +523,18 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
     if (await rejectSubagentThreadWrite(req, res, req.params.conversationId)) {
       return;
     }
-    const message = { ...req.body, conversationId: req.params.conversationId };
+    /** Trace sampling fields are ownership claims only the server writes. */
+    const message = withoutTraceRefs({ ...req.body, conversationId: req.params.conversationId });
     delete message.isUserSubmitted;
     delete message.userSubmittedPaths;
     delete message.userSubmittedMessageFieldPaths;
+    /** Server-private run state: a client-authored row must never seed a run's
+     * calibration or fading tiers, so the field only ever comes from the server. */
+    delete message.contextMeta;
     const reqCtx = {
       userId: req?.user?.id,
-      isTemporary: req?.body?.isTemporary,
+      isTemporary: req.resolvedConversation?.isTemporary ?? req?.body?.isTemporary,
+      expiredAt: req.resolvedConversation?.expiredAt,
       interfaceConfig: req?.config?.interfaceConfig,
     };
     const savedMessage = await db.saveMessage(
@@ -514,7 +555,7 @@ router.post('/:conversationId', storedMessageMutationMiddleware, async (req, res
       context: 'POST /api/messages/:conversationId',
       ...(savedMessage._id != null ? { appendMessageIds: [savedMessage._id] } : {}),
     });
-    res.status(201).json(savedMessage);
+    res.status(201).json(toClientMessage(savedMessage));
   } catch (error) {
     logger.error('Error saving message:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -677,7 +718,7 @@ router.put(
       // Best-effort: Assistants messages do not have deterministic AgentRun traces.
       if (!isAssistantsEndpoint(updatedMessage.endpoint)) {
         sendFeedbackScore({
-          traceId: traceIdForMessage(messageId),
+          traceId: traceIdForMessage(updatedMessage.langfuseRunId ?? messageId),
           sampled: updatedMessage.langfuseSampled,
           destinationIds: updatedMessage.langfuseDestinationIds,
           feedback: updatedMessage.feedback,

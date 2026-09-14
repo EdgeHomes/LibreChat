@@ -1,8 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { MutationKeys, QueryKeys, dataService } from 'librechat-data-provider';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
+import { DynamicQueryKeys, MutationKeys, QueryKeys, dataService } from 'librechat-data-provider';
 import type {
   CodeEnvironmentUserSettings,
   TCodeEnvironmentPairingResponse,
+  TCodeEnvironmentStatusResponse,
   TCodeEnvironmentsResponse,
 } from 'librechat-data-provider';
 
@@ -14,6 +15,32 @@ export function useCodeEnvironmentsQuery(enabled = true) {
     () => dataService.getCodeEnvironments(),
     { enabled },
   );
+}
+
+export function useCodeEnvironmentStatusQuery(id: string, enabled = true) {
+  return useQuery<TCodeEnvironmentStatusResponse>(
+    DynamicQueryKeys.codeEnvironmentStatus(id),
+    () => dataService.getCodeEnvironmentStatus(id),
+    {
+      enabled: enabled && id.length > 0,
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
+      retry: false,
+    },
+  );
+}
+
+export function useCodeEnvironmentStatusQueries(ids: string[], enabled = true) {
+  return useQueries({
+    queries: ids.map((id) => ({
+      queryKey: DynamicQueryKeys.codeEnvironmentStatus(id),
+      queryFn: () => dataService.getCodeEnvironmentStatus(id),
+      enabled: enabled && id.length > 0,
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
+      retry: false,
+    })),
+  });
 }
 
 export function usePairCodeEnvironmentMutation() {
