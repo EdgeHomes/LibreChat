@@ -80,6 +80,7 @@ api/tsconfig.json
 librechat.yaml
 librechat.yml
 litellm.yaml
+litellm-tiers.json
 librechat.test.yaml
 librechat.production.yaml
 docker-compose.test.yml

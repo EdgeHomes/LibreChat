@@ -9,6 +9,20 @@ export { createAdminAuditLogHandlers } from './auditLog';
 export { createAdminCodeEnvironmentHandlers } from './code';
 export { buildAuditContext } from './context';
 export { resolveConfigSecret, redactConfigSecretMaps } from './secrets';
+export {
+  keyAlias,
+  selectSpecs,
+  buildTierPlan,
+  buildKeyRequest,
+  parseTierMapping,
+  resolveTierModels,
+  buildGroupOverrides,
+  encryptTierOverrides,
+  validateTierMapping,
+  buildFloorKeyRequest,
+  FLOOR_TIER_NAME,
+  TIER_MANAGED_BY,
+} from './tiers';
 export type { AdminConfigDeps } from './config';
 export type { AdminLangfuseDeps } from './langfuse';
 export type { AdminGrantsDeps, GrantPrincipalType } from './grants';
@@ -18,3 +32,11 @@ export type { AdminSkillSyncAccessDeps, AdminSkillSyncDeps } from './skills';
 export type { AdminUsersDeps } from './users';
 export type { AdminAuditLogDeps } from './auditLog';
 export type { AdminCodeEnvironmentDeps } from './code';
+export type {
+  ModelTier,
+  TierMapping,
+  TierPlanEntry,
+  LiteLLMKeyRequest,
+  TierConfigOverrides,
+  TierValidationContext,
+} from './tiers';
