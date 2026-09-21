@@ -10,6 +10,10 @@
 data-node
 meili_data*
 librechat*
+# litellm.yaml and litellm-tiers.json are bind-mounted per stack. Baking a copy
+# in means a stale file wins silently wherever the mount is missing, instead of
+# failing loudly.
+litellm*
 Dockerfile*
 docs
 

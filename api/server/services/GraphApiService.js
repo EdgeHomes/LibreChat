@@ -15,6 +15,15 @@ const getLogStores = require('~/cache/getLogStores');
  */
 
 /**
+ * Winston's `errors` format replaces a record's message with the Error's own message whenever an
+ * Error is passed as metadata, discarding the call-site prefix — so `logger.error('[x] failed:',
+ * error)` logs only the provider's wording and cannot be grepped by the function that raised it.
+ * Interpolating the message keeps the prefix on the console; passing the error under a key keeps
+ * its stack in the JSON error log.
+ */
+const errorMessage = (error) => (error instanceof Error ? error.message : String(error));
+
+/**
  * Checks if Entra ID principal search feature is enabled based on environment variables and user authentication
  * @param {Object} user - User object from request
  * @param {string} user.provider - Authentication provider
@@ -50,7 +59,9 @@ const createGraphClient = async (accessToken, sub) => {
 
     return graphClient;
   } catch (error) {
-    logger.error('[createGraphClient] Error creating Graph client:', error);
+    logger.error(`[createGraphClient] Error creating Graph client: ${errorMessage(error)}`, {
+      err: error,
+    });
     throw error;
   }
 };
@@ -99,7 +110,9 @@ const exchangeTokenForGraphAccess = async (config, accessToken, sub) => {
 
     return grantResponse.access_token;
   } catch (error) {
-    logger.error('[exchangeTokenForGraphAccess] Token exchange failed:', error);
+    logger.error(`[exchangeTokenForGraphAccess] Token exchange failed: ${errorMessage(error)}`, {
+      err: error,
+    });
     throw error;
   }
 };
@@ -175,10 +188,19 @@ const getUserEntraGroups = async (accessToken, sub) => {
       .api('/me/getMemberGroups')
       .post({ securityEnabledOnly: false });
 
-    const groupIds = Array.isArray(response?.value) ? response.value : [];
-    return [...new Set(groupIds.map((groupId) => String(groupId)))];
+    if (!Array.isArray(response?.value)) {
+      logger.warn(
+        `[getUserEntraGroups] Unexpected /me/getMemberGroups response shape: ${JSON.stringify(response)?.slice(0, 500)}`,
+      );
+      return [];
+    }
+
+    logger.debug(`[getUserEntraGroups] /me/getMemberGroups returned ${response.value.length} ids`);
+    return [...new Set(response.value.map((groupId) => String(groupId)))];
   } catch (error) {
-    logger.error('[getUserEntraGroups] Error fetching user groups:', error);
+    logger.error(`[getUserEntraGroups] Error fetching user groups: ${errorMessage(error)}`, {
+      err: error,
+    });
     return [];
   }
 };
