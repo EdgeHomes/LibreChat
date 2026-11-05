@@ -157,3 +157,13 @@ traversal and `tool_call` indirection, then verifies saved bytes survive source 
   (0.1 limit), TBT 20.1 ms (500 ms limit), with 250 ms injected per database query.
 - No live backend, deployment configuration or service was changed. This is a local implementation;
   deployment and enabling the YAML policy are separate rollout steps.
+
+### Catalog fingerprint startup regression
+
+The initial workspace implementation bound filesystem roots during every environment-processing
+call. Catalog fingerprints are computed before an authenticated user is available, so that path
+raised `MCP file workspace requires an authenticated user` and prevented managed connections from
+starting. Fingerprinting now resolves operator environment values while hashing the unbound
+workspace policy. Runtime connection processing still requires the authenticated identity.
+Regression tests cover all four policies and use the real environment processor in manager tests;
+container verification also exercises the real registry, catalog discovery and managed connections.

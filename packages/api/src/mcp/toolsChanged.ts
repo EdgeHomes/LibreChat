@@ -36,7 +36,9 @@ export function getMCPAppToolsPublicationGeneration(config: ParsedServerConfig):
    * a rolling deployment. Address the catalog by the effective runtime config so an old replica's
    * live connection cannot publish into the new replica's slice. DB-sourced configs deliberately
    * remain literal because processMCPEnv derives that rule from dbId. */
-  const runtimeConfig = processMCPEnv({ options: config });
+  // The config identity addresses caches before a request user exists. Hash the operator's
+  // workspace policy; bind the private runtime root only when connecting as that user.
+  const runtimeConfig = processMCPEnv({ options: config, resolveFileWorkspace: false });
   const parsedConfig = MCPOptionsSchema.parse(runtimeConfig) as StableConfigValue;
   return createHash('sha256')
     .update(JSON.stringify(sortConfigValue(parsedConfig)))

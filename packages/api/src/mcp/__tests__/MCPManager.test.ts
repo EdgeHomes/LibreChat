@@ -4400,19 +4400,22 @@ describe('MCPManager', () => {
         dispose: jest.fn().mockResolvedValue(undefined),
       }) as unknown as MCPConnection;
 
-    const fileWorkspaceConfig = (): t.ParsedServerConfig => ({
-      type: 'stdio',
-      command: 'wordcraft-cli',
-      args: ['mcp'],
-      source: 'yaml',
-      fileWorkspace: {
-        root: '/tmp/wordcraft',
-        cleanupAfterDelivery: true,
-        retentionHours: 24,
-        maxFileBytes: 33554432,
-        sweepMaxEntries: 10000,
-      },
-    });
+    const fileWorkspaceConfig = (): t.ParsedServerConfig => {
+      mockProcessMCPEnv.mockImplementation(jest.requireActual('~/utils/env').processMCPEnv);
+      return {
+        type: 'stdio',
+        command: 'wordcraft-cli',
+        args: ['mcp'],
+        source: 'yaml',
+        fileWorkspace: {
+          root: '/tmp/wordcraft',
+          cleanupAfterDelivery: true,
+          retentionHours: 24,
+          maxFileBytes: 33554432,
+          sweepMaxEntries: 10000,
+        },
+      };
+    };
 
     it.each([false, true])(
       'reuses only the same authenticated workspace identity (ephemeral=%s)',

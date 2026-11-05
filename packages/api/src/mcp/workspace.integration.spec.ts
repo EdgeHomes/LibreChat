@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import { MCPOptionsSchema } from 'librechat-data-provider';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { getMCPFileWorkspace, bindMCPWorkspaceFiles } from './workspace';
+import { getMCPAppToolsPublicationGeneration } from './toolsChanged';
 import { formatToolContent } from './parsers';
 import { MCPConnection } from './connection';
 import { processMCPEnv } from '~/utils/env';
@@ -32,6 +33,10 @@ integration('real Craft stdio workspace isolation', () => {
         initTimeout: 10000,
         fileWorkspace: { root: operatorRoot },
       });
+      // Production catalog/cache callers fingerprint before binding any runtime user.
+      expect(getMCPAppToolsPublicationGeneration({ ...policy, source: 'yaml' })).toMatch(
+        /^[a-f0-9]{64}$/,
+      );
       const alice = { id: 'alice', tenantId: 'tenant-a' };
       const bob = { id: 'bob', tenantId: 'tenant-a' };
       const a = new MCPConnection({

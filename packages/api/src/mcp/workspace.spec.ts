@@ -292,3 +292,16 @@ it('tightens existing workspace permissions without following symlinks', async (
   expect((await fs.stat(root)).mode & 0o777).toBe(0o700);
   expect((await fs.stat(path.join(root, 'inputs'))).mode & 0o777).toBe(0o700);
 });
+
+it('keeps fingerprint processing separate from authenticated runtime root binding', () => {
+  const options = config();
+  const definition = processMCPEnv({ options, resolveFileWorkspace: false });
+  expect(definition).toEqual(options);
+  expect(() => processMCPEnv({ options })).toThrow('authenticated user');
+  expect(() => processMCPEnv({ options, dbSourced: true, resolveFileWorkspace: false })).toThrow(
+    'User-defined',
+  );
+  expect(processMCPEnv({ options: definition, user: alice })).toMatchObject({
+    cwd: getMCPFileWorkspace(options, alice),
+  });
+});
