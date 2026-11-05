@@ -22,7 +22,7 @@ jest.mock('./strategies', () => ({
       : {},
 }));
 
-const { stageMCPFileInputs, safeFilename } = require('./mcpInputs');
+const { stageMCPFileInputs, safeFilename, hideCodeTools } = require('./mcpInputs');
 
 describe('stageMCPFileInputs', () => {
   let root;
@@ -103,11 +103,47 @@ describe('stageMCPFileInputs', () => {
     ).toBe('');
   });
 
+  it('leaves images to the model', async () => {
+    const image = {
+      file_id: 'id-5',
+      filename: 'p.png',
+      type: 'image/png',
+      filepath: 'u1/a.xlsx',
+      source: 'local',
+    };
+    expect(await stageMCPFileInputs({ req, serverNames: ['pdfcraft'], files: [image] })).toBe('');
+  });
+
   it('strips directories and control characters from file names', () => {
     expect(safeFilename('..')).toBe('file');
     expect(safeFilename('')).toBe('file');
     expect(safeFilename(undefined)).toBe('file');
     expect(safeFilename('a/b\\c.pdf')).toBe('c.pdf');
     expect(safeFilename('x\u0001y')).toBe('x_y');
+  });
+});
+
+describe('hideCodeTools', () => {
+  const isCode = (name) => ['execute_code', 'bash_tool', 'read_file'].includes(name);
+
+  it('removes code tools from every place an agent lists them and keeps the rest', () => {
+    const agent = {
+      tools: ['execute_code', { name: 'pdf_create_mcp_pdfcraft' }, { name: 'bash_tool' }],
+      toolDefinitions: [{ name: 'read_file' }, { name: 'web_search' }],
+      toolRegistry: new Map([
+        ['execute_code', {}],
+        ['tool_call_mcp_pdfcraft', {}],
+      ]),
+      toolContextMap: { execute_code: 'use /mnt/data', web_search: 'x' },
+    };
+    expect(hideCodeTools(agent, isCode).sort()).toEqual(['bash_tool', 'execute_code', 'read_file']);
+    expect(agent.tools).toEqual([{ name: 'pdf_create_mcp_pdfcraft' }]);
+    expect(agent.toolDefinitions).toEqual([{ name: 'web_search' }]);
+    expect([...agent.toolRegistry.keys()]).toEqual(['tool_call_mcp_pdfcraft']);
+    expect(agent.toolContextMap).toEqual({ web_search: 'x' });
+  });
+
+  it('accepts an agent with no tools', () => {
+    expect(hideCodeTools({}, isCode)).toEqual([]);
   });
 });

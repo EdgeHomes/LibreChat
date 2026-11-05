@@ -87,6 +87,8 @@ async function stageMCPFileInputs({ req, serverNames, files }) {
       file?.file_id &&
       file.filepath &&
       file.source !== FileSources.text &&
+      // Images go to the model's vision input; staging them would also hide its code tools.
+      !String(file.type ?? '').startsWith('image/') &&
       !(Number(file.bytes) > maxBytes()),
   );
   if (usable.length === 0 || !serverNames?.length) {
@@ -128,4 +130,44 @@ async function stageMCPFileInputs({ req, serverNames, files }) {
   return lines.join('\n\n');
 }
 
-module.exports = { stageMCPFileInputs, fileInputDirFor, safeFilename };
+/**
+ * Removes the code-sandbox tools (and their prompt notes) from an agent for this turn. Called
+ * once uploads were staged for an MCP server: told in words to use the server's tools, models
+ * still reached for code execution, which then failed to provision the same upload. Mutates
+ * the runtime agent config in place, like `applyContextToAgent`.
+ * @param {object} agent - runtime agent config (`tools`, `toolDefinitions`, `toolRegistry`, ...)
+ * @param {(name: string) => boolean} isCodeTool
+ * @returns {string[]} the names removed
+ */
+function hideCodeTools(agent, isCodeTool) {
+  const removed = new Set();
+  const keep = (name) => {
+    if (typeof name === 'string' && isCodeTool(name)) {
+      removed.add(name);
+      return false;
+    }
+    return true;
+  };
+  if (Array.isArray(agent.tools)) {
+    agent.tools = agent.tools.filter((tool) => keep(typeof tool === 'string' ? tool : tool?.name));
+  }
+  if (Array.isArray(agent.toolDefinitions)) {
+    agent.toolDefinitions = agent.toolDefinitions.filter((def) => keep(def?.name));
+  }
+  if (agent.toolRegistry instanceof Map) {
+    for (const name of [...agent.toolRegistry.keys()]) {
+      if (!keep(name)) {
+        agent.toolRegistry.delete(name);
+      }
+    }
+  }
+  for (const key of ['toolContextMap', 'dynamicToolContextMap']) {
+    const map = agent[key];
+    if (map && typeof map === 'object') {
+      agent[key] = Object.fromEntries(Object.entries(map).filter(([name]) => keep(name)));
+    }
+  }
+  return [...removed];
+}
+
+module.exports = { stageMCPFileInputs, hideCodeTools, fileInputDirFor, safeFilename };

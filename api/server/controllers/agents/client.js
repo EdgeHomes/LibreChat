@@ -25,6 +25,8 @@ const {
   createCachedTokenCounter,
   applyContextToAgent,
   extractMCPServers,
+  isCodeFileToolName,
+  isCodeSessionToolName,
   isMemoryAgentEnabled,
   recordCollectedUsage,
   resolveRunUsageContext,
@@ -208,7 +210,7 @@ const {
   stripLangChainTroubleshootingUrl,
   DEFAULT_MEMORY_MAX_INPUT_TOKENS,
 } = require('librechat-data-provider');
-const { stageMCPFileInputs } = require('~/server/services/Files/mcpInputs');
+const { stageMCPFileInputs, hideCodeTools } = require('~/server/services/Files/mcpInputs');
 const { filterFilesByAgentAccess } = require('~/server/services/Files/permissions');
 const { encodeAndFormat } = require('~/server/services/Files/images/encode');
 const { createContextHandlers } = require('~/app/clients/prompts');
@@ -2999,6 +3001,13 @@ class AgentClient extends BaseClient {
       });
       if (mcpInputsNote) {
         agentRunContextParts.push(mcpInputsNote);
+        const hidden = hideCodeTools(
+          agent,
+          (name) => isCodeFileToolName(name) || isCodeSessionToolName(name),
+        );
+        if (hidden.length > 0) {
+          logger.info(`[AgentClient] Uploads staged for MCP; hid code tools: ${hidden.join(', ')}`);
+        }
       }
 
       await applyContextToAgent({
