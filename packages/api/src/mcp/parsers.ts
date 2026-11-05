@@ -101,6 +101,7 @@ const DOWNLOADABLE_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/rtf',
+  'text/csv',
 ]);
 
 const DEFAULT_MCP_FILE_MAX_BYTES = 32 * 1024 * 1024;
@@ -119,7 +120,7 @@ function resourceFilename(uri: string): string {
   } catch {
     // keep the raw segment
   }
-  name = name.replace(/[\\/\u0000-\u001f]/g, '_').trim();
+  name = name.replace(/[\\/\p{Cc}]/gu, '_').trim();
   return name && name !== '.' && name !== '..' ? name.slice(0, 200) : 'file';
 }
 

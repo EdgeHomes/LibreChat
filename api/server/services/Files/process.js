@@ -1643,6 +1643,7 @@ async function saveBase64File(data, { req, filename, type, context }) {
   const source = getFileStrategy(appConfig, { isImage: false });
   const { saveBuffer } = getStrategyFunctions(source);
   const filepath = await saveBuffer({
+    basePath: 'uploads',
     userId: req.user.id,
     fileName: `${file_id}-${filename}`,
     buffer,

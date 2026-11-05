@@ -32,6 +32,7 @@ const {
   getToolInputValidationDetails,
   captureSubagentIdentity,
   collectToolCallIds,
+  saveMCPFile,
 } = require('@librechat/api');
 const { processFileCitations } = require('~/server/services/Files/Citations');
 const { processCodeOutput, runPreviewFinalize } = require('~/server/services/Files/Code/process');
@@ -1069,12 +1070,7 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null, jo
       for (const mcpFile of output.artifact.mcp_files) {
         artifactPromises.push(
           (async () => {
-            const file = await saveBase64File(mcpFile.data, {
-              req,
-              filename: mcpFile.filename,
-              type: mcpFile.mimeType,
-              context: FileContext.message_attachment,
-            });
+            const file = await saveMCPFile(mcpFile, { req, saveBase64File, logger });
             if (!file) {
               return null;
             }
@@ -1459,12 +1455,7 @@ function createResponsesToolEndCallback({ req, res, tracker, artifactPromises })
       for (const mcpFile of output.artifact.mcp_files) {
         artifactPromises.push(
           (async () => {
-            const file = await saveBase64File(mcpFile.data, {
-              req,
-              filename: mcpFile.filename,
-              type: mcpFile.mimeType,
-              context: FileContext.message_attachment,
-            });
+            const file = await saveMCPFile(mcpFile, { req, saveBase64File, logger });
             if (!file) {
               return null;
             }

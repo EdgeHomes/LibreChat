@@ -10,6 +10,7 @@ import {
   processOpenIDPlaceholders,
   OpenIDReauthRequiredError,
 } from './oidc';
+import { resolveMCPFileWorkspace } from '~/mcp/workspace';
 
 /**
  * Provenance marker for MCP servers contributed by an Agent Plugins package.
@@ -549,7 +550,13 @@ export function processMCPEnv(params: {
     newObj.obo.scopes = processAdminValue(newObj.obo.scopes, dbSourced);
   }
 
-  return newObj;
+  if (dbSourced && 'fileWorkspace' in newObj && newObj.fileWorkspace) {
+    throw new Error('User-defined MCP servers cannot configure filesystem workspaces');
+  }
+  return resolveMCPFileWorkspace(newObj, {
+    id: user?.id ?? user?._id?.toString(),
+    tenantId: user?.tenantId,
+  });
 }
 
 /**

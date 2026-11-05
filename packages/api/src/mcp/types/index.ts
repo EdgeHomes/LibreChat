@@ -149,6 +149,8 @@ export type McpFileArtifact = {
   mimeType: string;
   /** Base64 file contents. */
   data: string;
+  /** Host-bound temporary source, never accepted from MCP resource metadata. */
+  workspace?: { serverName: string; path: string };
 };
 
 export type Artifacts =

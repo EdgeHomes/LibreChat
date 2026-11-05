@@ -282,6 +282,7 @@ const PROCESS_MCP_SERVER_FIELDS = new Set([
   'cwd',
   'stderr',
   'fileInputDir',
+  'fileWorkspace',
 ]);
 
 export function isProcessMCPServerField(field: string): boolean {
@@ -359,6 +360,24 @@ export const StdioOptionsSchema = BaseOptionsSchema.extend({
    * tools can open them. The server must run in the same filesystem (stdio). YAML only.
    */
   fileInputDir: z.string().optional(),
+  /** Authenticated per-user files and stdio sessions. Operator YAML only. */
+  fileWorkspace: z
+    .object({
+      root: z
+        .string()
+        .min(1)
+        .transform((value) => extractEnvVariable(value)),
+      cleanupAfterDelivery: z.boolean().default(true),
+      retentionHours: z.number().int().min(1).max(8760).default(24),
+      maxFileBytes: z
+        .number()
+        .int()
+        .min(1)
+        .max(512 * 1024 * 1024)
+        .default(32 * 1024 * 1024),
+      sweepMaxEntries: z.number().int().min(1).max(1_000_000).default(10_000),
+    })
+    .optional(),
 });
 
 export const WebSocketOptionsSchema = BaseOptionsSchema.extend({

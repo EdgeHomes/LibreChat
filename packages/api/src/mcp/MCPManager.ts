@@ -36,6 +36,7 @@ import { MCPConnectionFactory } from './MCPConnectionFactory';
 import { processMCPEnv, isPluginSourced } from '~/utils/env';
 import { OAuthLifecycleRelay } from './oauth/pending';
 import { preProcessGraphTokens } from '~/utils/graph';
+import { bindMCPWorkspaceFiles } from './workspace';
 import { isAbortError } from '~/utils/errors';
 import { formatToolContent } from './parsers';
 import { MCPConnection } from './connection';
@@ -357,7 +358,13 @@ export class MCPManager extends UserConnectionManager {
         ? await MCPServersRegistry.getInstance().getServerConfig(args.serverName, userId)
         : undefined);
 
-    if (effectiveConfig && userId && requiresUserScopedConnection(effectiveConfig)) {
+    if (effectiveConfig && requiresUserScopedConnection(effectiveConfig)) {
+      if (!userId) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          'An authenticated user is required for this MCP server',
+        );
+      }
       return this.getUserConnection({
         ...args,
         serverConfig: effectiveConfig,
@@ -1584,7 +1591,13 @@ Please follow these instructions when using tools from the respective MCP server
           await this.updateUserLastActivity(userId);
         }
         this.checkIdleConnections();
-        return formatToolContent(result as t.MCPToolCallResponse, provider);
+        return await bindMCPWorkspaceFiles(
+          formatToolContent(result as t.MCPToolCallResponse, provider),
+          result as t.MCPToolCallResponse,
+          rawConfig,
+          user ? { id: user.id ?? user._id?.toString(), tenantId: user.tenantId } : undefined,
+          serverName,
+        );
       } catch (error) {
         if (error instanceof OAuthRecoveryTakeoverRequired) {
           recoveryTakeoverConsumed = true;

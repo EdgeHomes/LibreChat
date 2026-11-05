@@ -5,6 +5,7 @@ import {
   defaultAssistantsVersion,
 } from 'librechat-data-provider';
 import type { AppConfig } from '@librechat/data-schemas';
+import { sweepMCPFileWorkspaces } from '~/mcp/workspace';
 
 const DEFAULT_FILE_RETENTION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_FILE_RETENTION_MAX_ATTEMPTS = 10;
@@ -274,6 +275,13 @@ export async function sweepExpiredFiles(
     logger,
   }: SweepDependencies,
 ): Promise<ExpiredFileSweepResult> {
+  try {
+    await sweepMCPFileWorkspaces(appConfig?.mcpConfig, Date.now(), (error) => {
+      logger.error('[MCP] Temporary workspace expiration failed', error);
+    });
+  } catch (error) {
+    logger.error('[MCP] Workspace expiration failed; durable attachments are unaffected', error);
+  }
   const maxAttempts = getFileRetentionMaxAttempts();
   /* Deadlines are anchored here rather than at the moment of failure. The
    * interval timer is armed before the sweep runs, so a deadline measured

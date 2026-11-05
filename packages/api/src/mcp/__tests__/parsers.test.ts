@@ -628,7 +628,11 @@ describe('formatToolContent', () => {
         content: [
           {
             type: 'resource',
-            resource: { uri: 'file:///report.pdf', mimeType: 'application/pdf', blob: binary },
+            resource: {
+              uri: 'file:///report.bin',
+              mimeType: 'application/octet-stream',
+              blob: binary,
+            },
           },
         ],
       };
@@ -638,8 +642,8 @@ describe('formatToolContent', () => {
       expect(content).toBe(
         [
           'Resource Content: 5 bytes of binary data (omitted; not UTF-8 text)',
-          'Resource URI: file:///report.pdf',
-          'Resource MIME Type: application/pdf',
+          'Resource URI: file:///report.bin',
+          'Resource MIME Type: application/octet-stream',
         ].join('\n'),
       );
       expect(content).not.toContain(binary);
@@ -870,7 +874,9 @@ describe('formatToolContent', () => {
 });
 
 describe('formatToolContent: downloadable MCP files', () => {
-  const pdf = Buffer.from('%PDF-1.7\n% plain ASCII so it would decode as text\n%%EOF\n').toString('base64');
+  const pdf = Buffer.from('%PDF-1.7\n% plain ASCII so it would decode as text\n%%EOF\n').toString(
+    'base64',
+  );
 
   it('turns a PDF resource blob into an mcp_files artifact, not text for the model', () => {
     const [text, artifacts] = formatToolContent(
@@ -897,7 +903,11 @@ describe('formatToolContent: downloadable MCP files', () => {
         content: [
           {
             type: 'resource',
-            resource: { uri: 'file:///..%2F..%2Fetc%2Fpasswd.pdf', mimeType: 'application/pdf', blob: pdf },
+            resource: {
+              uri: 'file:///..%2F..%2Fetc%2Fpasswd.pdf',
+              mimeType: 'application/pdf',
+              blob: pdf,
+            },
           },
         ],
       } as t.MCPToolCallResponse,
@@ -912,7 +922,11 @@ describe('formatToolContent: downloadable MCP files', () => {
         content: [
           {
             type: 'resource',
-            resource: { uri: 'file:///x.bin', mimeType: 'application/octet-stream', blob: Buffer.from([0, 1, 2]).toString('base64') },
+            resource: {
+              uri: 'file:///x.bin',
+              mimeType: 'application/octet-stream',
+              blob: Buffer.from([0, 1, 2]).toString('base64'),
+            },
           },
         ],
       } as t.MCPToolCallResponse,
@@ -921,4 +935,21 @@ describe('formatToolContent: downloadable MCP files', () => {
     expect(artifacts?.mcp_files).toBeUndefined();
     expect(text).toContain('bytes of binary data');
   });
+});
+
+it('returns CSV resource blobs as downloadable files instead of exposing their contents to the model', () => {
+  const data = Buffer.from('owner,secret\nalice,private').toString('base64');
+  const [content, artifact] = formatToolContent(
+    {
+      content: [
+        {
+          type: 'resource',
+          resource: { uri: 'file:///data.csv', mimeType: 'text/csv', blob: data },
+        },
+      ],
+    },
+    'openai',
+  );
+  expect(artifact?.mcp_files).toEqual([{ filename: 'data.csv', mimeType: 'text/csv', data }]);
+  expect(content).not.toContain('alice,private');
 });
