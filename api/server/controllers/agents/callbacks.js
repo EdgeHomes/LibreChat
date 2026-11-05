@@ -36,7 +36,7 @@ const {
 const { processFileCitations } = require('~/server/services/Files/Citations');
 const { processCodeOutput, runPreviewFinalize } = require('~/server/services/Files/Code/process');
 const { preflightCodeOutputBatch } = require('~/server/services/Files/Code/preflight');
-const { saveBase64Image } = require('~/server/services/Files/process');
+const { saveBase64Image, saveBase64File } = require('~/server/services/Files/process');
 
 function isHostFileAuthoringArtifact(artifact) {
   return artifact?.[HOST_FILE_AUTHORING_ARTIFACT_KEY] === true;
@@ -1065,6 +1065,37 @@ function createToolEndCallback({ req, res, artifactPromises, streamId = null, jo
       );
     }
 
+    if (Array.isArray(output.artifact.mcp_files)) {
+      for (const mcpFile of output.artifact.mcp_files) {
+        artifactPromises.push(
+          (async () => {
+            const file = await saveBase64File(mcpFile.data, {
+              req,
+              filename: mcpFile.filename,
+              type: mcpFile.mimeType,
+              context: FileContext.message_attachment,
+            });
+            if (!file) {
+              return null;
+            }
+            const fileMetadata = Object.assign(file, {
+              messageId: metadata.run_id,
+              toolCallId: output.tool_call_id,
+              conversationId: metadata.thread_id,
+            });
+            if (!streamId && !res.headersSent) {
+              return fileMetadata;
+            }
+            writeAttachment(res, streamId, fileMetadata, jobCreatedAt);
+            return fileMetadata;
+          })().catch((error) => {
+            logger.error('Error saving MCP file artifact:', error);
+            return null;
+          }),
+        );
+      }
+    }
+
     if (output.artifact.content) {
       /** @type {FormattedContent[]} */
       const content = output.artifact.content;
@@ -1422,6 +1453,43 @@ function createResponsesToolEndCallback({ req, res, tracker, artifactPromises })
           return null;
         }),
       );
+    }
+
+    if (Array.isArray(output.artifact.mcp_files)) {
+      for (const mcpFile of output.artifact.mcp_files) {
+        artifactPromises.push(
+          (async () => {
+            const file = await saveBase64File(mcpFile.data, {
+              req,
+              filename: mcpFile.filename,
+              type: mcpFile.mimeType,
+              context: FileContext.message_attachment,
+            });
+            if (!file) {
+              return null;
+            }
+            const fileMetadata = Object.assign(file, { toolCallId: output.tool_call_id });
+            if (res.headersSent && !res.writableEnded) {
+              writeResponsesAttachment(
+                res,
+                tracker,
+                {
+                  file_id: fileMetadata.file_id,
+                  filename: fileMetadata.filename,
+                  type: fileMetadata.type,
+                  url: fileMetadata.filepath,
+                  tool_call_id: output.tool_call_id,
+                },
+                metadata,
+              );
+            }
+            return fileMetadata;
+          })().catch((error) => {
+            logger.error('Error saving MCP file artifact:', error);
+            return null;
+          }),
+        );
+      }
     }
 
     if (output.artifact.content) {

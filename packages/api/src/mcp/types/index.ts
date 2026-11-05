@@ -144,6 +144,13 @@ export type FileSearchSource = {
   [key: string]: unknown;
 };
 
+export type McpFileArtifact = {
+  filename: string;
+  mimeType: string;
+  /** Base64 file contents. */
+  data: string;
+};
+
 export type Artifacts =
   | {
       content?: FormattedContent[];
@@ -155,6 +162,8 @@ export type Artifacts =
         fileCitations?: boolean;
       };
       [Tools.web_search]?: SearchResultData;
+      /** Files an MCP tool handed back for the user to download (embedded resource blobs). */
+      mcp_files?: McpFileArtifact[];
       files?: Array<{ id: string; name: string }>;
       session_id?: string;
       file_ids?: string[];

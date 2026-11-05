@@ -94,6 +94,55 @@ function isImageContent(item: t.ToolContentPart): item is t.ImageContent {
   return item.type === 'image';
 }
 
+/** Document types an MCP tool may hand back as an embedded resource blob for the user to download. */
+const DOWNLOADABLE_MIME_TYPES = new Set([
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/rtf',
+]);
+
+const DEFAULT_MCP_FILE_MAX_BYTES = 32 * 1024 * 1024;
+
+function getMcpFileMaxBytes(): number {
+  const parsed = Number(process.env.MCP_FILE_MAX_BYTES);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MCP_FILE_MAX_BYTES;
+}
+
+/** The file name a resource URI ends in, without any directory part; `file` when it has none. */
+function resourceFilename(uri: string): string {
+  const last = uri.split(/[\\/]/).pop() ?? '';
+  let name = last;
+  try {
+    name = decodeURIComponent(last);
+  } catch {
+    // keep the raw segment
+  }
+  name = name.replace(/[\\/\u0000-\u001f]/g, '_').trim();
+  return name && name !== '.' && name !== '..' ? name.slice(0, 200) : 'file';
+}
+
+/**
+ * A downloadable document delivered as a resource blob, or null. Checked by MIME type before the
+ * body is read, so a PDF that happens to decode as UTF-8 is never passed to the model as text.
+ */
+function readDownloadableFile(resource: t.ResourceContents): t.McpFileArtifact | null {
+  const mimeType = resource.mimeType?.split(';', 1)[0].trim().toLowerCase();
+  if (!mimeType || !DOWNLOADABLE_MIME_TYPES.has(mimeType)) {
+    return null;
+  }
+  if (!('blob' in resource) || typeof resource.blob !== 'string' || !resource.blob) {
+    return null;
+  }
+  const bytes = estimateBase64ImageBytes(resource.blob);
+  const maxBytes = getMcpFileMaxBytes();
+  if (bytes > maxBytes) {
+    throw new Error(`MCP file result exceeds maximum size of ${maxBytes} bytes: ${bytes} bytes`);
+  }
+  return { filename: resourceFilename(resource.uri), mimeType, data: resource.blob };
+}
+
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 
 /**
@@ -238,6 +287,7 @@ export function formatToolContent(
 
   const imageUrls: t.FormattedContent[] = [];
   const uiResources: UIResource[] = [];
+  const files: t.McpFileArtifact[] = [];
   let currentTextBlock = '';
 
   type ContentHandler = undefined | ((item: t.ToolContentPart) => void);
@@ -270,6 +320,7 @@ export function formatToolContent(
 
     resource: (item) => {
       const isUiResource = item.resource.uri.startsWith('ui://');
+      let downloadable: t.McpFileArtifact | null = null;
       const resourceText: string[] = [];
 
       if (isUiResource) {
@@ -285,6 +336,11 @@ export function formatToolContent(
         uiResources.push(uiResource);
         resourceText.push(`UI Resource ID: ${resourceId}`);
         resourceText.push(`UI Resource Marker: \\ui{${resourceId}}`);
+      } else if ((downloadable = readDownloadableFile(item.resource))) {
+        files.push(downloadable);
+        resourceText.push(
+          `File attached for the user to download: ${flattenMetadata(downloadable.filename)}`,
+        );
       } else {
         const body = readResourceBody(item.resource);
         if (body.text) {
@@ -351,6 +407,10 @@ UI Resource Markers Available:
       ...artifacts,
       [Tools.ui_resources]: { data: uiResources },
     };
+  }
+
+  if (files.length > 0) {
+    artifacts = { ...artifacts, mcp_files: files };
   }
 
   return [currentTextBlock || (artifacts !== undefined ? '' : '(No response)'), artifacts];
