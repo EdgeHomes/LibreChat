@@ -10,6 +10,7 @@ import {
   processOpenIDPlaceholders,
   OpenIDReauthRequiredError,
 } from './oidc';
+import { resolveMCPFileWorkspace } from '~/mcp/workspace';
 
 /**
  * Provenance marker for MCP servers contributed by an Agent Plugins package.
@@ -393,6 +394,8 @@ export function processMCPEnv(params: {
   body?: RequestBody;
   /** When true, only resolve customUserVars — skip env vars, user/OpenID/body placeholders (for DB-stored servers) */
   dbSourced?: boolean;
+  /** Config fingerprints resolve operator env values but cannot bind a runtime user directory. */
+  resolveFileWorkspace?: boolean;
 }): MCPOptions {
   const { options, user, customUserVars, body } = params;
 
@@ -549,7 +552,16 @@ export function processMCPEnv(params: {
     newObj.obo.scopes = processAdminValue(newObj.obo.scopes, dbSourced);
   }
 
-  return newObj;
+  if (dbSourced && 'fileWorkspace' in newObj && newObj.fileWorkspace) {
+    throw new Error('User-defined MCP servers cannot configure filesystem workspaces');
+  }
+  if (params.resolveFileWorkspace === false) {
+    return newObj;
+  }
+  return resolveMCPFileWorkspace(newObj, {
+    id: user?.id ?? user?._id?.toString(),
+    tenantId: user?.tenantId,
+  });
 }
 
 /**

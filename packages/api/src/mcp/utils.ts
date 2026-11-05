@@ -217,6 +217,7 @@ type UserScopedConnectionConfig = Pick<
   /** Loosened like the fields below: raw (pre-inspection) configs carry
    *  optional API-key fields, and the gating predicates only inspect them. */
   apiKey?: { key?: string; source?: 'user' | 'admin' } | null;
+  fileWorkspace?: { root?: string };
   args?: string[];
   /** Loosened from the parsed shapes so raw (pre-inspection) configs qualify;
    *  scoping predicates only check key presence */
@@ -349,7 +350,10 @@ export function hasRuntimeContextPlaceholders(config: UserScopedConnectionConfig
     return false;
   }
 
-  return placeholderBearingFields(config).some(hasRuntimeContextPlaceholder);
+  return (
+    config.fileWorkspace != null ||
+    placeholderBearingFields(config).some(hasRuntimeContextPlaceholder)
+  );
 }
 
 export function hasRuntimeUrlPlaceholders(config: UserScopedConnectionConfig): boolean {
@@ -504,6 +508,7 @@ export async function filterChatSelectableMCPServers(
  */
 export function requiresUserScopedConnection(config: UserScopedConnectionConfig): boolean {
   return (
+    config.fileWorkspace != null ||
     config.requiresOAuth === true ||
     config.obo != null ||
     hasCustomUserVars(config) ||
