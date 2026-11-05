@@ -275,7 +275,14 @@ const ProxyUrlSchema = z
     },
   );
 
-const PROCESS_MCP_SERVER_FIELDS = new Set(['command', 'args', 'env', 'cwd', 'stderr']);
+const PROCESS_MCP_SERVER_FIELDS = new Set([
+  'command',
+  'args',
+  'env',
+  'cwd',
+  'stderr',
+  'fileInputDir',
+]);
 
 export function isProcessMCPServerField(field: string): boolean {
   return PROCESS_MCP_SERVER_FIELDS.has(field);
@@ -346,6 +353,12 @@ export const StdioOptionsSchema = BaseOptionsSchema.extend({
    * packages, which resolve and contain the path before it reaches this schema.
    */
   cwd: z.string().optional(),
+  /**
+   * Absolute folder (inside the server's own root) that LibreChat copies the user's chat uploads
+   * into, as `<fileInputDir>/inputs/<file_id>/<name>`, telling the model the paths so the server's
+   * tools can open them. The server must run in the same filesystem (stdio). YAML only.
+   */
+  fileInputDir: z.string().optional(),
 });
 
 export const WebSocketOptionsSchema = BaseOptionsSchema.extend({

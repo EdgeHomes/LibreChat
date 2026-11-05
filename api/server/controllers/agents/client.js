@@ -24,6 +24,7 @@ const {
   memoryInstructions,
   createCachedTokenCounter,
   applyContextToAgent,
+  extractMCPServers,
   isMemoryAgentEnabled,
   recordCollectedUsage,
   resolveRunUsageContext,
@@ -207,6 +208,7 @@ const {
   stripLangChainTroubleshootingUrl,
   DEFAULT_MEMORY_MAX_INPUT_TOKENS,
 } = require('librechat-data-provider');
+const { stageMCPFileInputs } = require('~/server/services/Files/mcpInputs');
 const { filterFilesByAgentAccess } = require('~/server/services/Files/permissions');
 const { encodeAndFormat } = require('~/server/services/Files/images/encode');
 const { createContextHandlers } = require('~/app/clients/prompts');
@@ -2983,6 +2985,20 @@ class AgentClient extends BaseClient {
       if (scopedContext) {
         modelBoundFileContexts.add(scopedContext);
         agentRunContextParts.push(scopedContext);
+      }
+      const mcpInputsNote = await stageMCPFileInputs({
+        req: this.options.req,
+        serverNames: [
+          ...extractMCPServers(agent),
+          ...(agentId === this.options.agent.id ? (ephemeralAgent?.mcp ?? []) : []),
+        ],
+        files: [...((await this.options.attachments) ?? []), ...(agent.requestAttachments ?? [])],
+      }).catch((error) => {
+        logger.warn('[AgentClient] Could not stage uploads for MCP servers', error);
+        return '';
+      });
+      if (mcpInputsNote) {
+        agentRunContextParts.push(mcpInputsNote);
       }
 
       await applyContextToAgent({
