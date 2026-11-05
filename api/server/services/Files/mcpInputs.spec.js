@@ -73,6 +73,7 @@ describe('stageMCPFileInputs', () => {
     expect(fs.readFileSync(target, 'utf8')).toBe('XLSX-BYTES');
     expect(note).toContain(target);
     expect(note).toContain('"pdfcraft"');
+    expect(note).toContain('Do not use code execution');
     expect(note).not.toContain('gone.pdf');
     expect(note).not.toContain('t.txt');
     expect(note.split('Files the user attached')).toHaveLength(2);

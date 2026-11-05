@@ -118,7 +118,10 @@ async function stageMCPFileInputs({ req, serverNames, files }) {
     }
     if (staged.length > 0) {
       lines.push(
-        `Files the user attached are available to the "${serverName}" MCP tools at these paths. Open, edit or convert them there, then return the result with that server's file tools:\n${staged.join('\n')}`,
+        `Files the user attached are available to the "${serverName}" MCP tools at these paths:\n${staged.join('\n')}\n` +
+          `To read, edit, fill, convert or otherwise work on these files, call the "${serverName}" tools with these exact paths. ` +
+          `Do not use code execution, bash or Python for them, and do not look for them in /mnt/data. ` +
+          `Save results with the "${serverName}" tools and return them to the user with its file tools (for example file_attach).`,
       );
     }
   }
