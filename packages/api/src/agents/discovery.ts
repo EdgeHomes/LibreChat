@@ -25,7 +25,9 @@ import { initializeAgent as defaultInitializeAgent } from './initialize';
 import { createEdgeCollector, resolveReachableGraph } from './edges';
 import { isFatalAgentInitializationError } from './errors';
 import { createConcurrencyLimiter } from '~/utils/promise';
+import { getLookupConcurrency } from '~/utils/concurrency';
 import { createSequentialChainEdges } from './chain';
+import { detachOnAbort } from '~/utils/promises';
 
 const SUBAGENT_GRAPH_LOAD_CONCURRENCY = 4;
 
@@ -55,6 +57,8 @@ export type CheckAgentPermission = (params: {
 export interface DiscoverConnectedAgentsParams {
   req: ServerRequest;
   res: ServerResponse;
+  /** Owning run signal used to distinguish cancellation from dependency aborts. */
+  signal?: AbortSignal;
   /** The already-initialized primary agent config (starting point for BFS). */
   primaryConfig: InitializedAgent;
   /**
@@ -118,16 +122,27 @@ export interface DiscoverConnectedAgentsParams {
    * request-memoized read as its parent.
    */
   resolveWebSearchGrant?: InitializeAgentParams['resolveWebSearchGrant'];
+  /**
+   * Resolves a handoff/subagent's own `instructionsPrompt` link, forwarded so
+   * every discovered agent honors its link the same way the primary does.
+   * There is no default resolution path, unlike `resolveWebSearchGrant` —
+   * omitting it leaves a linked handoff agent with empty instructions.
+   */
+  resolveLinkedInstructions?: InitializeAgentParams['resolveLinkedInstructions'];
+  /** Forwarded verbatim; the resume path sets this `false` for every discovered agent. */
+  recordLinkedPromptUsage?: InitializeAgentParams['recordLinkedPromptUsage'];
   /** Sibling of `codeEnvAvailable` — the `stateful_code_sessions` capability flag, forwarded to every handoff `initializeAgent`. */
   statefulSessionsAvailable?: InitializeAgentParams['statefulSessionsAvailable'];
   /** Deployment policy for stateful workspace scopes, forwarded unchanged to every referenced agent. */
   allowedStatefulCodeEnvironments?: InitializeAgentParams['allowedStatefulCodeEnvironments'];
-  /**
-   * Run-level inline memory availability gate. Forwarded verbatim to every
-   * handoff agent so sub-agents that list the `memory` capability expand the
-   * `set_memory` + `delete_memory` pair only when the parent run permits it.
-   */
   memoryAvailable?: InitializeAgentParams['memoryAvailable'];
+  /**
+   * Explicitly enables the authoritative ChatProject guidance/resources for
+   * every discovered handoff and saved graph member. This is intentionally
+   * independent of the request marker so remote callers can opt in without
+   * broadening unrelated agent initialization.
+   */
+  useChatProjectContext?: InitializeAgentParams['useChatProjectContext'];
   /**
    * Run-level `run_in_background` capability gate. Forwarded verbatim so a
    * handoff/connected agent's own event-driven tools with
@@ -195,7 +210,7 @@ async function initializeReferencedAgent(
   params: DiscoverConnectedAgentsParams,
   deps: DiscoverConnectedAgentsDeps,
 ): Promise<{ agent: Agent; config: InitializedAgent } | null> {
-  const agent = await deps.getAgent({ id: agentId });
+  const agent = await detachOnAbort(deps.getAgent({ id: agentId }), params.signal);
   if (!agent) {
     logger.warn(`[initializeReferencedAgent] Agent ${agentId} not found, skipping`);
     deps.onAgentSkipped?.(agentId);
@@ -209,13 +224,16 @@ async function initializeReferencedAgent(
     return null;
   }
 
-  const hasAccess = await deps.checkPermission({
-    userId,
-    role: params.req.user?.role,
-    resourceType: params.resourceType ?? ResourceType.AGENT,
-    resourceId: agent._id,
-    requiredPermission: PermissionBits.VIEW,
-  });
+  const hasAccess = await detachOnAbort(
+    deps.checkPermission({
+      userId,
+      role: params.req.user?.role,
+      resourceType: params.resourceType ?? ResourceType.AGENT,
+      resourceId: agent._id,
+      requiredPermission: PermissionBits.VIEW,
+    }),
+    params.signal,
+  );
   if (!hasAccess) {
     logger.warn(`[initializeReferencedAgent] User ${userId} lacks VIEW access to agent ${agentId}`);
     deps.onAgentSkipped?.(agentId);
@@ -223,48 +241,58 @@ async function initializeReferencedAgent(
   }
 
   const validateAgentModel = deps.validateAgentModel ?? defaultValidateAgentModel;
-  const validation = await validateAgentModel({
-    req: params.req,
-    res: params.res,
-    agent,
-    modelsConfig: params.modelsConfig,
-    logViolation: deps.logViolation,
-  });
+  const validation = await detachOnAbort(
+    validateAgentModel({
+      req: params.req,
+      res: params.res,
+      agent,
+      modelsConfig: params.modelsConfig,
+      logViolation: deps.logViolation,
+    }),
+    params.signal,
+  );
   if (!validation.isValid) {
     throw new Error(validation.error?.message);
   }
 
   const scopedSkillIds = params.computeAccessibleSkillIds?.(agent);
   const initializeAgent = deps.initializeAgent ?? defaultInitializeAgent;
-  const config = await initializeAgent(
-    {
-      req: params.req,
-      res: params.res,
-      agent,
-      loadTools: params.loadTools,
-      requestFiles: params.requestFiles,
-      conversationId: params.conversationId,
-      parentMessageId: params.parentMessageId,
-      requestBody: params.requestBody,
-      endpointOption: {
-        ...(params.endpointOption ?? {}),
-        endpoint: EModelEndpoint.agents,
+  const config = await detachOnAbort(
+    initializeAgent(
+      {
+        req: params.req,
+        res: params.res,
+        agent,
+        loadTools: params.loadTools,
+        requestFiles: params.requestFiles,
+        conversationId: params.conversationId,
+        parentMessageId: params.parentMessageId,
+        requestBody: params.requestBody,
+        endpointOption: {
+          ...(params.endpointOption ?? {}),
+          endpoint: EModelEndpoint.agents,
+        },
+        allowedProviders: params.allowedProviders,
+        useChatProjectContext: params.useChatProjectContext,
+        accessibleSkillIds: scopedSkillIds,
+        skillAuthoringAvailable: params.computeSkillAuthoringAvailable?.(agent, scopedSkillIds),
+        skillStates: params.skillStates,
+        defaultActiveOnShare: params.defaultActiveOnShare,
+        codeEnvAvailable: params.codeEnvAvailable,
+        fileSearchAvailable: params.fileSearchAvailable,
+        resolveWebSearchGrant: params.resolveWebSearchGrant,
+        resolveLinkedInstructions: params.resolveLinkedInstructions,
+        recordLinkedPromptUsage: params.recordLinkedPromptUsage,
+        backgroundToolsAvailable: params.backgroundToolsAvailable,
+        toolIntentsAvailable: params.toolIntentsAvailable,
+        statefulSessionsAvailable: params.statefulSessionsAvailable,
+        allowedStatefulCodeEnvironments: params.allowedStatefulCodeEnvironments,
+        memoryAvailable: params.memoryAvailable,
+        signal: params.signal,
       },
-      allowedProviders: params.allowedProviders,
-      accessibleSkillIds: scopedSkillIds,
-      skillAuthoringAvailable: params.computeSkillAuthoringAvailable?.(agent, scopedSkillIds),
-      skillStates: params.skillStates,
-      defaultActiveOnShare: params.defaultActiveOnShare,
-      codeEnvAvailable: params.codeEnvAvailable,
-      fileSearchAvailable: params.fileSearchAvailable,
-      resolveWebSearchGrant: params.resolveWebSearchGrant,
-      backgroundToolsAvailable: params.backgroundToolsAvailable,
-      toolIntentsAvailable: params.toolIntentsAvailable,
-      statefulSessionsAvailable: params.statefulSessionsAvailable,
-      allowedStatefulCodeEnvironments: params.allowedStatefulCodeEnvironments,
-      memoryAvailable: params.memoryAvailable,
-    },
-    deps.db,
+      deps.db,
+    ),
+    params.signal,
   );
   deps.onAgentInitialized?.(agentId, agent, config);
   return { agent, config };
@@ -329,7 +357,7 @@ export async function resolveSubagentGraphs(
               }
               return resolved;
             } catch (error) {
-              if (isFatalAgentInitializationError(error)) {
+              if (isFatalAgentInitializationError(error, { signal: params.signal })) {
                 throw error;
               }
               failedMemberIds.add(memberId);
@@ -416,11 +444,17 @@ export async function discoverConnectedAgents(
     onAgentSkipped?.(agentId);
   };
 
-  const processAgent = async (agentId: string): Promise<Agent | null> => {
-    const loaded = await initializeReferencedAgent(agentId, params, {
+  const loadAgent = (agentId: string): ReturnType<typeof initializeReferencedAgent> =>
+    initializeReferencedAgent(agentId, params, {
       ...deps,
       onAgentSkipped: markSkipped,
     });
+
+  /** Side effects are applied in discovery order so merges stay deterministic. */
+  const applyLoaded = (
+    agentId: string,
+    loaded: Awaited<ReturnType<typeof initializeReferencedAgent>>,
+  ): Agent | null => {
     if (!loaded) {
       return null;
     }
@@ -439,6 +473,9 @@ export async function discoverConnectedAgents(
     return agent;
   };
 
+  const processAgent = async (agentId: string): Promise<Agent | null> =>
+    applyLoaded(agentId, await loadAgent(agentId));
+
   const checkAgentInit = (agentId: string): boolean =>
     agentId === primaryConfig.id || agentConfigs.has(agentId);
 
@@ -449,20 +486,53 @@ export async function discoverConnectedAgents(
 
   collectEdges(primaryConfig.edges);
 
+  const loadDiscovered = createConcurrencyLimiter(
+    getLookupConcurrency(params.req.config, 'connectedAgentLoads'),
+  );
   while (agentsToProcess.size > 0) {
-    const agentId = agentsToProcess.values().next().value as string;
-    agentsToProcess.delete(agentId);
-    try {
-      const agent = await processAgent(agentId);
+    /** One BFS level: agents already queued are independent, so load them together
+     *  and fold results back in queue order. Edges they expose form the next level. */
+    const level = [...agentsToProcess];
+    agentsToProcess.clear();
+    /** Outcomes never reject; a fatal error also rejects `fatal`, so it surfaces as soon
+     *  as it happens instead of after earlier, slower siblings finish. */
+    let rejectFatal: (error: unknown) => void = () => undefined;
+    const fatal = new Promise<never>((_, reject) => {
+      rejectFatal = reject;
+    });
+    fatal.catch(() => undefined);
+    const outcomes = level.map((agentId) =>
+      loadDiscovered(async () => {
+        try {
+          return { loaded: await loadAgent(agentId) };
+        } catch (error) {
+          if (isFatalAgentInitializationError(error, { signal: params.signal })) {
+            rejectFatal(error);
+          }
+          return { error };
+        }
+      }),
+    );
+    /** Stage every loaded config before collecting edges, so a sibling referenced by
+     *  another member of the level is not queued a second time. */
+    const loadedAgents: Array<Agent | null> = [];
+    for (let index = 0; index < level.length; index++) {
+      const agentId = level[index];
+      const outcome = await Promise.race([outcomes[index], fatal]);
+      if ('error' in outcome) {
+        if (isFatalAgentInitializationError(outcome.error, { signal: params.signal })) {
+          throw outcome.error;
+        }
+        logger.error(`[discoverConnectedAgents] Error processing agent ${agentId}:`, outcome.error);
+        markSkipped(agentId);
+        continue;
+      }
+      loadedAgents.push(applyLoaded(agentId, outcome.loaded));
+    }
+    for (const agent of loadedAgents) {
       if (agent?.edges?.length) {
         collectEdges(agent.edges);
       }
-    } catch (err) {
-      if (isFatalAgentInitializationError(err)) {
-        throw err;
-      }
-      logger.error(`[discoverConnectedAgents] Error processing agent ${agentId}:`, err);
-      markSkipped(agentId);
     }
   }
 
@@ -475,7 +545,7 @@ export async function discoverConnectedAgents(
       try {
         await processAgent(agentId);
       } catch (err) {
-        if (isFatalAgentInitializationError(err)) {
+        if (isFatalAgentInitializationError(err, { signal: params.signal })) {
           throw err;
         }
         logger.error(`[discoverConnectedAgents] Error processing chain agent ${agentId}:`, err);

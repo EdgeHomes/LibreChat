@@ -9,6 +9,7 @@ jest.mock('@librechat/api', () => ({
   logAxiosError: jest.fn(),
   isEnabled: jest.fn((val) => val === 'true' || val === true),
   readFileAsString: jest.fn(),
+  serviceRequestBudget: jest.fn(() => ({ timeout: 10000 })),
 }));
 
 const savedEnv = { ...process.env };
@@ -52,6 +53,7 @@ function loadSendEmail() {
     logAxiosError: jest.fn(),
     isEnabled: jest.fn((val) => val === 'true' || val === true),
     readFileAsString: jest.fn().mockResolvedValue({ content: '<p>{{name}}</p>' }),
+    serviceRequestBudget: jest.fn(() => ({ timeout: 10000 })),
   }));
   return require('../sendEmail');
 }
@@ -139,5 +141,18 @@ describe('sendEmail SMTP auth assembly', () => {
     await sendEmail(baseParams);
 
     expect(freshLogger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('sendEmail SMTP encryption options', () => {
+  it('requires STARTTLS when EMAIL_ENCRYPTION=starttls', async () => {
+    process.env.EMAIL_ENCRYPTION = 'starttls';
+    const sendEmail = loadSendEmail();
+    const { createTransport } = require('nodemailer');
+
+    await sendEmail(baseParams);
+
+    const transporterOptions = createTransport.mock.calls[0][0];
+    expect(transporterOptions).toMatchObject({ secure: false, requireTLS: true });
   });
 });

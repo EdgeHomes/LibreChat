@@ -1,4 +1,5 @@
 import React from 'react';
+import { FileSources } from 'librechat-data-provider';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import type { Artifact } from '~/common';
 import { fileToArtifact, TOOL_ARTIFACT_TYPES } from '~/utils/artifacts';
@@ -8,6 +9,7 @@ const mockFileDownload = jest.fn();
 const mockAttachmentOptions = jest.fn();
 let mockFileKey = 'index.html';
 let mockCurrentCode: string | undefined;
+let mockCodeArtifactId: string | undefined;
 
 jest.mock('~/hooks', () => ({
   useLocalize:
@@ -22,8 +24,11 @@ jest.mock('~/hooks/Artifacts/useArtifactProps', () => ({
 }));
 
 jest.mock('~/Providers/EditorContext', () => ({
-  useCodeState: () => ({ currentCode: mockCurrentCode }),
+  useArtifactCode: (artifactId: string) =>
+    mockCodeArtifactId === artifactId ? mockCurrentCode : undefined,
 }));
+
+const mockShowToast = jest.fn();
 
 /* MorphIcon renders a single morphing <svg> with no per-icon class, so map
  * the lucide icon data it was handed back to a stable name instead. */
@@ -32,6 +37,7 @@ jest.mock('@librechat/client', () => {
   const { Download, CircleCheckBig } = jest.requireActual('lucide');
   return {
     ...jest.requireActual('@librechat/client'),
+    useToastContext: () => ({ showToast: mockShowToast }),
     MorphIcon: createMorphIconMock([
       [Download, 'download'],
       [CircleCheckBig, 'circle-check-big'],
@@ -109,7 +115,9 @@ describe('DownloadArtifact', () => {
   beforeEach(() => {
     mockFileKey = 'index.html';
     mockCurrentCode = undefined;
+    mockCodeArtifactId = undefined;
     mockFileDownload.mockReset();
+    mockShowToast.mockReset();
     // The attachment helper resolves to `true` when a file was delivered.
     mockFileDownload.mockResolvedValue(true);
     createObjectURL = jest.fn(() => 'blob:mock');
@@ -156,6 +164,7 @@ describe('DownloadArtifact', () => {
   ])('names %s download with title %s', async (type, title, fileKey, language, expected) => {
     mockFileKey = fileKey;
     mockCurrentCode = 'edited content';
+    mockCodeArtifactId = htmlArtifact.id;
     render(<DownloadArtifact artifact={{ ...htmlArtifact, type, title, language }} />);
     await act(async () => {
       fireEvent.click(screen.getByRole('button'));
@@ -176,6 +185,7 @@ describe('DownloadArtifact', () => {
     async (title) => {
       mockFileKey = 'content.md';
       mockCurrentCode = '# New **migration** [plan](https://example.com) for `migrate_users.py`';
+      mockCodeArtifactId = htmlArtifact.id;
       render(
         <DownloadArtifact
           artifact={{ ...htmlArtifact, type: 'text/markdown', title, content: '# Old heading' }}
@@ -195,7 +205,6 @@ describe('DownloadArtifact', () => {
     ['page.htm', 'index.html'],
     ['README.markdown', 'content.md'],
     ['README.mdx', 'content.md'],
-    ['diagram.mermaid', 'diagram.mmd'],
   ])('downloads file-backed raw content as %s', async (filename, fileKey) => {
     mockFileKey = fileKey;
     const artifact = fileToArtifact({ file_id: 'file', filename, text: 'Raw content' });
@@ -297,6 +306,7 @@ describe('DownloadArtifact', () => {
         text: 'Prefix\n\n…[truncated]',
         filepath: '/api/files/code/output/large.py',
       });
+      mockCodeArtifactId = artifact!.id;
       render(<DownloadArtifact artifact={artifact!} />);
       await act(async () => {
         fireEvent.click(screen.getByRole('button'));
@@ -316,6 +326,7 @@ describe('DownloadArtifact', () => {
         text: 'Prefix\n\n…[truncated]',
         filepath: '/api/files/code/output/large.py',
       });
+      mockCodeArtifactId = artifact!.id;
       render(<DownloadArtifact artifact={artifact!} />);
       await act(async () => {
         fireEvent.click(screen.getByRole('button'));
@@ -326,6 +337,26 @@ describe('DownloadArtifact', () => {
       expect(blob.size).toBe(edit.length);
     },
   );
+
+  /* The buffer outlives a pane remount, so the next artifact must not be
+   * exported with the previous artifact's edits under its own name. */
+  it('ignores an edit that belongs to another artifact', async () => {
+    mockCurrentCode = 'edits for the other artifact';
+    mockCodeArtifactId = 'llm-artifact-other';
+    render(
+      <DownloadArtifact artifact={{ ...htmlArtifact, content: '<h1>mine</h1>', title: 'Mine' }} />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button'));
+    });
+    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    const content = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsText(blob);
+    });
+    expect(content).toBe('<h1>mine</h1>');
+  });
 
   it('names a truncated preview distinctly when the original route is unavailable', async () => {
     const artifact = fileToArtifact({
@@ -402,6 +433,77 @@ describe('DownloadArtifact', () => {
     expect(mockFileDownload).toHaveBeenCalledTimes(1);
     expect(container.querySelector('[data-icon="circle-check-big"]')).toBeNull();
     expect(container.querySelector('[data-icon="download"]')).not.toBeNull();
+  });
+
+  it('reports a failed blob export instead of looking like it worked', async () => {
+    /* The mermaid export menu only speaks in its live region for a reported
+     * failure, on the rule that whichever layer returned `false` already
+     * told the user. This is that layer for the blob path. */
+    createObjectURL.mockImplementation(() => {
+      throw new Error('no object url');
+    });
+    const { container } = render(<DownloadArtifact artifact={htmlArtifact} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button'));
+    });
+    /* The hook localizes through `~/hooks/useLocalize` directly, outside
+     * this file's `~/hooks` mock, so the real string lands here. */
+    expect(mockShowToast).toHaveBeenCalledWith({
+      status: 'error',
+      message: 'Error downloading file. The file may have been deleted.',
+    });
+    expect(container.querySelector('[data-icon="circle-check-big"]')).toBeNull();
+  });
+
+  it('downloads an unedited mermaid diagram from its stored file, not the cached text', async () => {
+    /* `attachment.text` is the backend's cached extraction, and
+     * `extractUtf8` keeps only the first 512 KB of it, so a large stored
+     * `.mmd` would be saved truncated if the panel serialized `content`
+     * instead of fetching the file. */
+    mockFileKey = 'diagram.mmd';
+    const artifact = fileToArtifact({
+      file_id: 'file',
+      filename: 'flow.mmd',
+      text: 'graph TD\nA-->B\n\n…[truncated]',
+      filepath: '/api/files/code/output/session/flow.mmd',
+      source: FileSources.execute_code,
+      user: 'user-1',
+    });
+    expect(artifact?.type).toBe(TOOL_ARTIFACT_TYPES.MERMAID);
+    const { container } = render(<DownloadArtifact artifact={artifact!} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button'));
+    });
+    expect(mockFileDownload).toHaveBeenCalledTimes(1);
+    expect(mockAttachmentOptions).toHaveBeenCalledWith(
+      expect.objectContaining({ filename: 'flow.mmd' }),
+    );
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-icon="circle-check-big"]')).not.toBeNull();
+  });
+
+  it('serializes an edited mermaid diagram from the panel content', async () => {
+    /* Edits live only in the editor, so the stored file is the wrong bytes.
+     * The blob is named as a preview of that file: the panel's copy is the
+     * cached extraction, which the backend truncates past 512 KB. */
+    mockFileKey = 'diagram.mmd';
+    mockCurrentCode = 'graph TD\nA-->C';
+    const artifact = fileToArtifact({
+      file_id: 'file',
+      filename: 'flow.mmd',
+      text: 'graph TD\nA-->B',
+      filepath: '/api/files/code/output/session/flow.mmd',
+      source: FileSources.execute_code,
+      user: 'user-1',
+    });
+    mockCodeArtifactId = artifact!.id;
+    render(<DownloadArtifact artifact={artifact!} />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button'));
+    });
+    expect(mockFileDownload).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(anchorClick.mock.instances[0].download).toBe('flow.preview.mmd');
   });
 
   it('serializes content as a blob for a non-file-backed (LLM-authored) artifact', async () => {

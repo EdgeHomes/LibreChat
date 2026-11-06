@@ -2,6 +2,7 @@ import path from 'path';
 import crypto from 'node:crypto';
 import { createReadStream } from 'fs';
 import { readFile, stat } from 'fs/promises';
+import { UnsupportedProviderAudioError } from '~/files/upload/errors';
 
 const USER_FACING_UPLOAD_ERRORS = [
   ['Invalid file format', 'Invalid file format'],
@@ -98,6 +99,9 @@ export function resolveUploadErrorMessage(
   defaultMessage = 'Error processing file',
   redactDetails = false,
 ): string {
+  if (error instanceof UnsupportedProviderAudioError) {
+    return error.message;
+  }
   const errorMessage = error?.message;
   if (!errorMessage) {
     return defaultMessage;
@@ -522,20 +526,4 @@ export async function readFileAsBuffer(
   // For smaller files, read directly
   const content = await readFile(filePath);
   return { content, bytes };
-}
-
-/**
- * Reads a JSON file asynchronously
- *
- * @param filePath - Path to the JSON file to read
- * @param options - Options for reading the file
- * @returns Promise resolving to the parsed JSON object
- * @throws Error if the file cannot be read or parsed
- */
-export async function readJsonFile<T = unknown>(
-  filePath: string,
-  options: Omit<ReadFileOptions, 'encoding'> = {},
-): Promise<T> {
-  const { content } = await readFileAsString(filePath, { ...options, encoding: 'utf8' });
-  return JSON.parse(content);
 }

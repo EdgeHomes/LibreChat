@@ -23,6 +23,7 @@ const {
   resolveUploadLLMDeliveryPath,
   isResponsesApiUpload,
   isSpeechProviderConfigured,
+  getCustomEndpointProvider,
 } = require('librechat-data-provider');
 const {
   processAgentFileUpload,
@@ -107,6 +108,7 @@ router.post('/', async (req, res) => {
       endpointConfig: getEndpointFileConfig({ fileConfig, endpoint: effectiveEndpoint }),
       fileConfig,
       endpoint: effectiveEndpoint,
+      endpointProvider: getCustomEndpointProvider(req.config?.endpoints?.custom, effectiveEndpoint),
       useResponsesApi: isResponsesApiUpload(metadata.useResponsesApi),
       sttConfigured: isSpeechProviderConfigured(req.config?.speech?.stt),
     });
@@ -167,7 +169,6 @@ router.post('/', async (req, res) => {
     openSseStreamIfRequested();
     await processImageFile({ req, res, metadata, sseStream });
   } catch (error) {
-    // TODO: delete remote file if it exists
     logger.error('[/files/images] Error processing file:', getSafeErrorMetadata(error));
 
     try {
