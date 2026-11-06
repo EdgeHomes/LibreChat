@@ -1,17 +1,26 @@
 import { useMemo, useState, useCallback, memo } from 'react';
+import { FileContainer } from '@librechat/chat/components';
 import type { TFile, TMessage } from 'librechat-data-provider';
-import FileContainer from '~/components/Chat/Input/Files/FileContainer';
+import { useMessagePartsHost } from '~/Providers/MessagePartsHostContext';
+import { usesImagePreview, hydrateFileDeliveryMetadata } from '~/utils';
 import FilePreviewDialog from './FilePreviewDialog';
+import { useShareContext } from '~/Providers';
 import Image from './Image';
 
 const Files = ({ message }: { message?: TMessage }) => {
+  const fileMap = useMessagePartsHost().useFileMap();
+  const { shareId } = useShareContext();
+  const files = useMemo(
+    () => hydrateFileDeliveryMetadata(message?.files, undefined, shareId ? undefined : fileMap),
+    [message?.files, fileMap, shareId],
+  );
   const imageFiles = useMemo(() => {
-    return message?.files?.filter((file) => file.type?.startsWith('image/')) || [];
-  }, [message?.files]);
+    return files?.filter(usesImagePreview) || [];
+  }, [files]);
 
   const otherFiles = useMemo(() => {
-    return message?.files?.filter((file) => !file.type?.startsWith('image/')) || [];
-  }, [message?.files]);
+    return files?.filter((file) => !usesImagePreview(file)) || [];
+  }, [files]);
 
   const [selectedFile, setSelectedFile] = useState<Partial<TFile> | null>(null);
 
@@ -28,6 +37,8 @@ const Files = ({ message }: { message?: TMessage }) => {
           <FileContainer
             key={file.file_id}
             file={file as TFile}
+            buttonClassName="border-surface-user-message max-w-full bg-transparent"
+            containerClassName="max-w-full"
             onClick={() => setSelectedFile(file)}
           />
         ))}
@@ -35,6 +46,8 @@ const Files = ({ message }: { message?: TMessage }) => {
         imageFiles.map((file) => (
           <Image
             key={file.file_id}
+            alignRight
+            className="border-surface-user-message mt-0 shadow-none"
             imagePath={file.preview ?? file.filepath ?? ''}
             height={file.height ?? 1920}
             width={file.width ?? 1080}
@@ -50,6 +63,7 @@ const Files = ({ message }: { message?: TMessage }) => {
         fileType={selectedFile?.type ?? undefined}
         fileSource={selectedFile?.source}
         fileSize={(selectedFile as TFile)?.bytes}
+        deliveryPath={selectedFile?.llmDeliveryPath}
       />
     </>
   );

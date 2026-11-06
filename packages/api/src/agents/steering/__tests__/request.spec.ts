@@ -1,11 +1,12 @@
 import type { IMongoFile } from '@librechat/data-schemas';
 import { InMemoryEventTransport } from '~/stream/implementations/InMemoryEventTransport';
-import { buildPendingAction, buildToolApprovalPayload } from '~/agents/hitl/policy';
 import { handleSteerRequest, handleSteerCancel, handleSteerArm } from '../request';
+import { buildToolApprovalPayload } from '~/agents/hitl/__fixtures__/approval';
 import { InMemoryJobStore } from '~/stream/implementations/InMemoryJobStore';
 import { isSteeringSupported, isSteerPreemptSupported } from '../runtime';
 import { STEER_QUEUE_MAX_DEPTH } from '~/stream/interfaces/IJobStore';
 import { GenerationJobManager } from '~/stream/GenerationJobManager';
+import { buildPendingAction } from '~/agents/hitl/policy';
 
 jest.mock('../runtime', () => ({
   ...jest.requireActual('../runtime'),
@@ -264,6 +265,7 @@ describe('handleSteerRequest (real in-memory job manager)', () => {
           height: 10,
           width: 20,
           bytes: 999,
+          llmDeliveryPath: 'text',
           user: 'someone-else',
           embedded: true,
         },
@@ -292,6 +294,7 @@ describe('handleSteerRequest (real in-memory job manager)', () => {
         height: 10,
         width: 20,
         bytes: 999,
+        llmDeliveryPath: 'text',
       },
     ]);
   });
@@ -388,6 +391,7 @@ describe('handleSteerRequest (real in-memory job manager)', () => {
       height: 4,
       width: 6,
       bytes: 111,
+      llmDeliveryPath: 'text',
       user: 'user-1',
     } as unknown as IMongoFile;
 
@@ -450,6 +454,7 @@ describe('handleSteerRequest (real in-memory job manager)', () => {
           height: 4,
           width: 6,
           bytes: 111,
+          llmDeliveryPath: 'text',
         },
       ]);
     });
@@ -914,6 +919,57 @@ describe('generation protocol bridge for steering mutations', () => {
     expect(quoted?.fingerprint).toBe(plain?.fingerprint);
     expect(typeof quoted?.requestedQuotesFingerprint).toBe('string');
     expect(plain?.requestedQuotesFingerprint).toBeUndefined();
+  });
+
+  it('keeps receipt fingerprints stable when display delivery metadata is added', async () => {
+    const streamId = 'steer-protocol-v2-delivery-path-fingerprint';
+    await GenerationJobManager.createJob(streamId, user.id, undefined, {
+      initialMetadata: { generationProtocolVersion: 2 },
+    });
+    const base = {
+      conversationId: streamId,
+      text: 'same attachment steer',
+      files: [{ file_id: 'f1', type: 'application/pdf', filename: 'report.pdf' }],
+    };
+
+    await handleSteerRequest(
+      user,
+      { ...base, clientSteerId: 'client-legacy-file-ref' },
+      {
+        generationProtocolVersion: 2,
+      },
+    );
+    await handleSteerRequest(
+      user,
+      {
+        ...base,
+        clientSteerId: 'client-current-file-ref',
+        files: [{ ...base.files[0], llmDeliveryPath: 'text' }],
+      },
+      { generationProtocolVersion: 2 },
+    );
+
+    const legacy = await GenerationJobManager.steering.getReceipt(
+      streamId,
+      'client-legacy-file-ref',
+    );
+    const current = await GenerationJobManager.steering.getReceipt(
+      streamId,
+      'client-current-file-ref',
+    );
+    expect(current?.fingerprint).toBe(legacy?.fingerprint);
+    for (const [clientSteerId, files] of [
+      ['client-legacy-file-ref', [{ ...base.files[0], llmDeliveryPath: 'text' }]],
+      ['client-current-file-ref', base.files],
+    ] as const) {
+      const replay = await handleSteerRequest(
+        user,
+        { ...base, clientSteerId, files },
+        { generationProtocolVersion: 2 },
+      );
+      expect(replay.body).toMatchObject({ replayed: true });
+    }
+    expect(await GenerationJobManager.steering.peek(streamId)).toHaveLength(2);
   });
 
   it('treats quotes as part of the idempotency identity', async () => {
