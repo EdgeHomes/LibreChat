@@ -41,6 +41,8 @@ export * from './mcp/icons';
 /* Utilities */
 export * from './mcp/utils';
 export * from './mcp/context';
+export * from './mcp/workspace';
+export * from './files/mcp';
 export * from './utils';
 export { default as Tokenizer, countTokens } from './utils/tokenizer';
 export type { EncodingName } from './utils/tokenizer';

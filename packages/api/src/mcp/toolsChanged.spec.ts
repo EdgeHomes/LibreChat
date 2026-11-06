@@ -65,6 +65,41 @@ describe('MCP tools-changed dispatch', () => {
     );
   });
 
+  it.each(['wordcraft', 'gridcraft', 'deckcraft', 'pdfcraft'])(
+    'fingerprints the operator %s workspace policy without requiring a runtime user',
+    (name) => {
+      const config: ParsedServerConfig = {
+        type: 'stdio',
+        command: 'npx',
+        args: ['-y', `${name}-edge-mcp`],
+        source: 'yaml',
+        fileWorkspace: {
+          root: `/app/uploads/${name}`,
+          cleanupAfterDelivery: true,
+          retentionHours: 24,
+          maxFileBytes: 33554432,
+          sweepMaxEntries: 10000,
+        },
+      };
+      expect(() => getMCPAppToolsPublicationGeneration(config)).not.toThrow();
+      const generation = getMCPAppToolsPublicationGeneration(config);
+      expect(generation).toMatch(/^[a-f0-9]{64}$/);
+      expect(getMCPAppToolsPublicationGeneration({ ...config, updatedAt: 999 })).toBe(generation);
+      expect(
+        getMCPAppToolsPublicationGeneration({
+          ...config,
+          fileWorkspace: { ...config.fileWorkspace!, root: `/other/${name}` },
+        }),
+      ).not.toBe(generation);
+      expect(
+        getMCPAppToolsPublicationGeneration({
+          ...config,
+          fileWorkspace: { ...config.fileWorkspace!, cleanupAfterDelivery: false },
+        }),
+      ).not.toBe(generation);
+    },
+  );
+
   it('includes the resolved runtime environment in app publication generations', () => {
     const variable = 'LIBRECHAT_MCP_CATALOG_ORIGIN_TEST';
     const original = process.env[variable];

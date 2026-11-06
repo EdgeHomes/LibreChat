@@ -32,10 +32,11 @@ import {
 } from './errors';
 import { createSSRFSafeUndiciConnect, isSSRFTarget, resolveHostnameSSRF } from '~/auth';
 import { reserveMCPToolsChangedRevision } from './toolsChanged';
-import { applyPositionRole } from './position';
+import { prepareMCPFileWorkspace } from './workspace';
 import { runOutsideTracing } from '~/utils/tracing';
 import { mediaTypeEssence } from '~/utils/headers';
 import { isAddressAllowed } from '~/auth/domain';
+import { applyPositionRole } from './position';
 import { withTimeout } from '~/utils/promise';
 import { isOAuthServer } from './utils';
 import { mcpConfig } from './mcpConfig';
@@ -1492,6 +1493,7 @@ export class MCPConnection extends EventEmitter {
           if (!isStdioOptions(options)) {
             throw new Error('Invalid options for stdio transport.');
           }
+          await prepareMCPFileWorkspace(options);
           return new StdioClientTransport({
             command: options.command,
             args: options.args,
@@ -1540,10 +1542,7 @@ export class MCPConnection extends EventEmitter {
           const abortController = new AbortController();
 
           /** Add OAuth token to headers if available */
-          const headers = applyPositionRole(
-            { ...options.headers },
-            this.oauthTokens?.access_token,
-          );
+          const headers = applyPositionRole({ ...options.headers }, this.oauthTokens?.access_token);
           if (this.oauthTokens?.access_token) {
             headers['Authorization'] = `Bearer ${this.oauthTokens.access_token}`;
           }
@@ -1659,10 +1658,7 @@ export class MCPConnection extends EventEmitter {
           const abortController = new AbortController();
 
           /** Add OAuth token to headers if available */
-          const headers = applyPositionRole(
-            { ...options.headers },
-            this.oauthTokens?.access_token,
-          );
+          const headers = applyPositionRole({ ...options.headers }, this.oauthTokens?.access_token);
           if (this.oauthTokens?.access_token) {
             headers['Authorization'] = `Bearer ${this.oauthTokens.access_token}`;
           }

@@ -1,5 +1,6 @@
 import {
   MCPOptionsSchema,
+  isProcessMCPServerConfig,
   SSEOptionsSchema,
   StreamableHTTPOptionsSchema,
   MCPServerUserInputSchema,
@@ -830,4 +831,48 @@ describe('MCP_USER_INPUT_FIELDS', () => {
     expect(MCP_USER_INPUT_FIELDS.has('args')).toBe(false);
     expect(MCP_USER_INPUT_FIELDS.has('env')).toBe(false);
   });
+});
+
+describe('authenticated MCP file workspaces', () => {
+  it('exposes limits and cleanup settings through the YAML MCP schema with legacy defaults unchanged', () => {
+    const parsed = MCPOptionsSchema.parse({
+      command: 'npx',
+      args: [],
+      fileWorkspace: { root: '/app/uploads/wordcraft' },
+    });
+    expect(parsed).toMatchObject({
+      fileWorkspace: {
+        root: '/app/uploads/wordcraft',
+        cleanupAfterDelivery: true,
+        retentionHours: 24,
+        maxFileBytes: 33554432,
+        sweepMaxEntries: 10000,
+      },
+    });
+    const legacy = MCPOptionsSchema.parse({ command: 'npx', args: [] });
+    expect('fileWorkspace' in legacy && legacy.fileWorkspace).toBeFalsy();
+  });
+  it('classifies workspace roots as privileged process fields and prevents user configurations enabling them', () => {
+    expect(isProcessMCPServerConfig({ fileWorkspace: { root: '/etc' } })).toBe(true);
+    const user = MCPServerUserInputSchema.safeParse({
+      type: 'streamable-http',
+      url: 'https://example.org/mcp',
+      fileWorkspace: { root: '/etc' },
+    });
+    if (user.success) {
+      expect('fileWorkspace' in user.data).toBe(false);
+    }
+  });
+  it.each([{ retentionHours: 0 }, { maxFileBytes: -1 }, { sweepMaxEntries: 0 }])(
+    'rejects invalid workspace settings: %p',
+    (setting) => {
+      expect(
+        MCPOptionsSchema.safeParse({
+          command: 'npx',
+          args: [],
+          fileWorkspace: { root: '/tmp', ...setting },
+        }).success,
+      ).toBe(false);
+    },
+  );
 });

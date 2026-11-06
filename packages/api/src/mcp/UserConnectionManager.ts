@@ -26,11 +26,13 @@ import { OAuthLifecycleRelay } from '~/mcp/oauth/pending';
 import { preProcessGraphTokens } from '~/utils/graph';
 import { detectOAuthRequirement } from '~/mcp/oauth';
 import { isMCPDomainAllowed } from '~/auth/domain';
+import { getMCPFileWorkspace } from './workspace';
 import { MCPConnection } from './connection';
 import { mcpConfig } from './mcpConfig';
 import { isEnabled } from '~/utils';
 
 type PendingConnection = {
+  workspaceRoot?: string;
   promise: Promise<MCPConnection>;
   oauth: OAuthLifecycleRelay;
   directBearerRecoveryState: t.DirectBearerRecoveryState;
@@ -88,6 +90,8 @@ export abstract class UserConnectionManager {
   protected userLastActivity: Map<string, number> = new Map();
   /** In-flight connection promises keyed by `userId:serverName` — coalesces concurrent attempts */
   protected pendingConnections: Map<string, PendingConnection> = new Map();
+  private readonly fileWorkspaceRoots = new WeakMap<MCPConnection, string>();
+  private readonly pendingFileWorkspaceRoots = new WeakMap<Promise<unknown>, string>();
   /** Recovery state owned by request-scoped promises, which the public store intentionally keeps opaque. */
   private readonly requestPendingDirectBearerRecoveryStates = new WeakMap<
     Promise<unknown>,
@@ -343,6 +347,7 @@ export abstract class UserConnectionManager {
     const config =
       opts.serverConfig ??
       (await MCPServersRegistry.getInstance().getServerConfig(serverName, userId));
+    const workspaceRoot = config ? getMCPFileWorkspace(config, user) : undefined;
     const missingBodyFields = config
       ? getMissingRuntimeBodyPlaceholderFields(config, opts.requestBody)
       : [];
@@ -368,7 +373,11 @@ export abstract class UserConnectionManager {
         | MCPConnection
         | undefined;
       if (existing) {
-        if (!config || (config.updatedAt && existing.isStale(config.updatedAt))) {
+        if (
+          !config ||
+          (config.updatedAt && existing.isStale(config.updatedAt)) ||
+          this.fileWorkspaceRoots.get(existing) !== workspaceRoot
+        ) {
           requestScopedConnections.connections.delete(requestConnectionKey);
           await this.disposeEvictedConnection(existing, `[MCP][User: ${userId}]`);
         } else {
@@ -404,6 +413,12 @@ export abstract class UserConnectionManager {
         | Promise<MCPConnection>
         | undefined;
       if (pending) {
+        if (this.pendingFileWorkspaceRoots.get(pending) !== workspaceRoot) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            'MCP workspace identity changed during connection creation; retry the request',
+          );
+        }
         logger.debug(`[MCP][User: ${userId}] Joining in-flight request-scoped connection attempt`);
         const connection = await pending;
         if (this.requestPendingDirectBearerRecoveryStates.get(pending)?.attempted) {
@@ -452,6 +467,9 @@ export abstract class UserConnectionManager {
         return connection;
       });
 
+      if (workspaceRoot) {
+        this.pendingFileWorkspaceRoots.set(connectionPromise, workspaceRoot);
+      }
       requestScopedConnections.pending.set(
         requestConnectionKey,
         connectionPromise as Promise<unknown>,
@@ -479,6 +497,12 @@ export abstract class UserConnectionManager {
     if (!forceNewConnection) {
       const pending = this.pendingConnections.get(lockKey);
       if (pending) {
+        if (pending.workspaceRoot !== workspaceRoot) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            'MCP workspace identity changed during connection creation; retry the request',
+          );
+        }
         logger.debug(`[MCP][User: ${userId}] Joining in-flight connection attempt`);
         const mutationFence = this.createConnectionMutationFence(userId, serverName);
         try {
@@ -549,6 +573,7 @@ export abstract class UserConnectionManager {
 
     if (!forceNewConnection) {
       this.pendingConnections.set(lockKey, {
+        workspaceRoot,
         promise: connectionPromise,
         oauth: pendingOAuth,
         directBearerRecoveryState,
@@ -601,16 +626,16 @@ export abstract class UserConnectionManager {
   ): Promise<MCPConnection> {
     signal?.throwIfAborted();
     this.assertCreationNotCancelled(creationGuard, userId, serverName);
-    if (await this.appConnections!.has(serverName)) {
+    const config =
+      providedConfig ??
+      (await MCPServersRegistry.getInstance().getServerConfig(serverName, userId));
+    const workspaceRoot = config ? getMCPFileWorkspace(config, user) : undefined;
+    if (!workspaceRoot && (await this.appConnections!.has(serverName))) {
       throw new McpError(
         ErrorCode.InvalidRequest,
         `[MCP][User: ${userId}] Trying to create user-specific connection for app-level server "${serverName}"`,
       );
     }
-
-    const config =
-      providedConfig ??
-      (await MCPServersRegistry.getInstance().getServerConfig(serverName, userId));
 
     /** Capture before resolving credentials/creating the connection. If another replica rotates
      *  the generation while creation is in flight, this connection's publications are fenced. */
@@ -620,6 +645,13 @@ export abstract class UserConnectionManager {
 
     const userServerMap = this.userConnections.get(userId);
     let connection = userServerMap?.get(serverName);
+    if (connection && this.fileWorkspaceRoots.get(connection) !== workspaceRoot) {
+      await this.disconnectUserConnection(userId, serverName, {
+        preservedCreation: creationGuard,
+        reason: 'lifecycle',
+      });
+      connection = undefined;
+    }
     if (forceNew && connection && !ephemeralConnection) {
       logger.info(
         `[MCP][User: ${userId}][${serverName}] Disposing existing connection before forced replacement`,
@@ -881,6 +913,9 @@ export abstract class UserConnectionManager {
       }
 
       connection = await MCPConnectionFactory.create(basic, connectionOptions);
+      if (workspaceRoot) {
+        this.fileWorkspaceRoots.set(connection, workspaceRoot);
+      }
 
       this.assertCreationNotCancelled(creationGuard, userId, serverName);
 

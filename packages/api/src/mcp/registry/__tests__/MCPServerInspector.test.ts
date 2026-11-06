@@ -22,6 +22,24 @@ describe('MCPServerInspector', () => {
   });
 
   describe('inspect()', () => {
+    it('defers workspace-backed stdio inspection until an authenticated user connects', async () => {
+      const rawConfig: t.MCPOptions = {
+        type: 'stdio',
+        command: 'npx',
+        args: ['-y', 'wordcraft-edge-mcp'],
+        fileWorkspace: {
+          root: '/tmp/wordcraft',
+          cleanupAfterDelivery: true,
+          retentionHours: 24,
+          maxFileBytes: 33554432,
+          sweepMaxEntries: 10000,
+        },
+      };
+      const result = await MCPServerInspector.inspect('wordcraft', rawConfig);
+      expect(MCPConnectionFactory.create).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ fileWorkspace: rawConfig.fileWorkspace });
+    });
+
     it('should process env and fetch all metadata for non-OAuth stdio server with serverInstructions=true', async () => {
       const rawConfig: t.MCPOptions = {
         type: 'stdio',

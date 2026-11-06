@@ -291,6 +291,53 @@ describe('MCPManager', () => {
     });
   });
 
+  describe('file workspace connections', () => {
+    it.each(['wordcraft', 'gridcraft', 'deckcraft', 'pdfcraft'])(
+      'never borrows an existing app-shared %s process for either user',
+      async (name) => {
+        const shared = {} as MCPConnection;
+        const aliceConnection = {} as MCPConnection;
+        const bobConnection = {} as MCPConnection;
+        const getShared = jest.fn().mockResolvedValue(shared);
+        mockAppConnections({ get: getShared });
+        const manager = await MCPManager.createInstance(newMCPServersConfig());
+        const config: t.ParsedServerConfig = {
+          type: 'stdio',
+          command: 'npx',
+          args: ['-y', `${name}-edge-mcp`],
+          source: 'yaml',
+          fileWorkspace: {
+            root: `/tmp/${name}`,
+            cleanupAfterDelivery: true,
+            retentionHours: 24,
+            maxFileBytes: 33554432,
+            sweepMaxEntries: 10000,
+          },
+        };
+        const checkout = jest
+          .spyOn(manager, 'getUserConnection')
+          .mockResolvedValueOnce(aliceConnection)
+          .mockResolvedValueOnce(bobConnection);
+        await expect(
+          manager.getConnection({
+            serverName: name,
+            serverConfig: config,
+            user: { id: 'alice' } as IUser,
+          }),
+        ).resolves.toBe(aliceConnection);
+        await expect(
+          manager.getConnection({
+            serverName: name,
+            serverConfig: config,
+            user: { id: 'bob' } as IUser,
+          }),
+        ).resolves.toBe(bobConnection);
+        expect(checkout).toHaveBeenCalledTimes(2);
+        expect(getShared).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe('withUserConnectionLease', () => {
     it('retains a public checkout until its metadata read completes', async () => {
       const connection = {} as MCPConnection;
@@ -4352,6 +4399,97 @@ describe('MCPManager', () => {
         removeAllListeners: jest.fn(),
         dispose: jest.fn().mockResolvedValue(undefined),
       }) as unknown as MCPConnection;
+
+    const fileWorkspaceConfig = (): t.ParsedServerConfig => {
+      mockProcessMCPEnv.mockImplementation(jest.requireActual('~/utils/env').processMCPEnv);
+      return {
+        type: 'stdio',
+        command: 'wordcraft-cli',
+        args: ['mcp'],
+        source: 'yaml',
+        fileWorkspace: {
+          root: '/tmp/wordcraft',
+          cleanupAfterDelivery: true,
+          retentionHours: 24,
+          maxFileBytes: 33554432,
+          sweepMaxEntries: 10000,
+        },
+      };
+    };
+
+    it.each([false, true])(
+      'reuses only the same authenticated workspace identity (ephemeral=%s)',
+      async (ephemeralConnection) => {
+        const original = newUserConnection();
+        const replacement = newUserConnection();
+        // A stale shared process may survive a config refresh, but cannot prevent private creation.
+        mockAppConnections({ has: jest.fn().mockResolvedValue(true) });
+        (MCPConnectionFactory.create as jest.Mock)
+          .mockResolvedValueOnce(original)
+          .mockResolvedValueOnce(replacement);
+        const manager = await MCPManager.createInstance(newMCPServersConfig());
+        const requestScopedConnections = ephemeralConnection
+          ? createMCPRequestContext()
+          : undefined;
+        const options = {
+          serverName,
+          serverConfig: fileWorkspaceConfig(),
+          ephemeralConnection,
+          requestScopedConnections,
+        };
+        const user = { id: mockUser.id, tenantId: 'tenant-a' } as IUser;
+        await expect(manager.getUserConnection({ ...options, user })).resolves.toBe(original);
+        await expect(manager.getUserConnection({ ...options, user })).resolves.toBe(original);
+        await expect(
+          manager.getUserConnection({
+            ...options,
+            user: { id: user.id, tenantId: 'tenant-b' } as IUser,
+          }),
+        ).resolves.toBe(replacement);
+        expect(original.dispose).toHaveBeenCalledTimes(1);
+        expect(MCPConnectionFactory.create).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each([false, true])(
+      'refuses to join another workspace identity during creation (ephemeral=%s)',
+      async (ephemeralConnection) => {
+        const connection = newUserConnection();
+        let finish: ((value: MCPConnection) => void) | undefined;
+        const pending = new Promise<MCPConnection>((resolve) => {
+          finish = resolve;
+        });
+        mockAppConnections({ has: jest.fn().mockResolvedValue(false) });
+        (MCPConnectionFactory.create as jest.Mock).mockReturnValue(pending);
+        const manager = await MCPManager.createInstance(newMCPServersConfig());
+        const requestScopedConnections = ephemeralConnection
+          ? createMCPRequestContext()
+          : undefined;
+        const options = {
+          serverName,
+          serverConfig: fileWorkspaceConfig(),
+          ephemeralConnection,
+          requestScopedConnections,
+        };
+        const user = { id: mockUser.id, tenantId: 'tenant-a' } as IUser;
+        const creation = manager.getUserConnection({ ...options, user });
+        while ((MCPConnectionFactory.create as jest.Mock).mock.calls.length === 0) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        try {
+          await expect(
+            manager.getUserConnection({
+              ...options,
+              user: { id: user.id, tenantId: 'tenant-b' } as IUser,
+            }),
+          ).rejects.toThrow('workspace identity changed');
+          expect(MCPConnectionFactory.create).toHaveBeenCalledTimes(1);
+        } finally {
+          finish?.(connection);
+          await creation;
+        }
+      },
+    );
 
     /** An OAuth server whose connection build refreshes credentials, fencing the catalog mid-build. */
     const refreshingOAuthServer = () => {

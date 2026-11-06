@@ -508,6 +508,8 @@ actions:
 #     - '127.0.0.1:8080'
 
 # Example MCP Servers Object Structure
+# Private WordCraft/GridCraft/DeckCraft/PdfCraft roots and post-delivery cleanup:
+# see docs/workspaces.md (fileWorkspace is operator YAML only).
 # mcpServers:
 #   everything:
 #     # type: sse # type can optionally be omitted

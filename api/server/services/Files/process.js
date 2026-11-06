@@ -1627,6 +1627,48 @@ async function saveBase64Image(
 }
 
 /**
+ * Saves a non-image file an MCP tool handed back (base64) as the user's file, so it shows as a
+ * downloadable chat attachment behind the usual file permissions.
+ * @param {string} data - Base64 contents.
+ * @param {{ req: ServerRequest; filename: string; type: string; context: string }} params
+ */
+async function saveBase64File(data, { req, filename, type, context }) {
+  const retentionExpiryPromise = getRetentionExpiry(req);
+  const appConfig = req.config;
+  const file_id = v4();
+  const buffer = Buffer.from(data, 'base64');
+  if (buffer.length === 0) {
+    throw new Error('Empty file');
+  }
+  const source = getFileStrategy(appConfig, { isImage: false });
+  const { saveBuffer } = getStrategyFunctions(source);
+  const filepath = await saveBuffer({
+    basePath: 'uploads',
+    userId: req.user.id,
+    fileName: `${file_id}-${filename}`,
+    buffer,
+    tenantId: req.user.tenantId,
+  });
+  const storageMetadata = getStorageMetadata({ filepath, source });
+  return await db.createFile(
+    {
+      type,
+      source,
+      context,
+      file_id,
+      filepath,
+      ...storageMetadata,
+      filename,
+      user: req.user.id,
+      bytes: buffer.length,
+      ...(await retentionExpiryPromise),
+      tenantId: req.user.tenantId,
+    },
+    true,
+  );
+}
+
+/**
  * Filters a file based on its size and the endpoint origin.
  *
  * @param {Object} params - The parameters for the function.
@@ -1732,6 +1774,7 @@ module.exports = {
   filterFile,
   processFileURL,
   saveBase64Image,
+  saveBase64File,
   processImageFile,
   uploadImageBuffer,
   sweepExpiredFiles,

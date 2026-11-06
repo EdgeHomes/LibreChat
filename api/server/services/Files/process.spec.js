@@ -274,6 +274,7 @@ const {
   sweepExpiredFiles,
   startExpiredFileSweep,
   filterFile,
+  saveBase64File,
 } = require('./process');
 const {
   inspectContent,
@@ -3186,5 +3187,35 @@ describe('filterFile endpoint resolution', () => {
     req.body.endpoint = 'Disabled Provider';
 
     expect(() => filterFile({ req, image: true, isAvatar: true })).not.toThrow();
+  });
+});
+
+describe('MCP attachment persistence', () => {
+  it('saves downloads under private uploads and records the authenticated owner and tenant', async () => {
+    const saveBuffer = jest.fn().mockResolvedValue('/uploads/alice/mock-uuid-Budget.csv');
+    getStrategyFunctions.mockReturnValue({ saveBuffer });
+    const req = { config: { fileStrategy: 'local' }, user: { id: 'alice', tenantId: 'tenant-a' } };
+    await saveBase64File(Buffer.from('alice,private').toString('base64'), {
+      req,
+      filename: 'Budget.csv',
+      type: 'text/csv',
+      context: FileContext.message_attachment,
+    });
+    expect(saveBuffer).toHaveBeenCalledWith({
+      basePath: 'uploads',
+      userId: 'alice',
+      tenantId: 'tenant-a',
+      fileName: 'mock-uuid-Budget.csv',
+      buffer: Buffer.from('alice,private'),
+    });
+    expect(db.createFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user: 'alice',
+        tenantId: 'tenant-a',
+        filepath: '/uploads/alice/mock-uuid-Budget.csv',
+        context: FileContext.message_attachment,
+      }),
+      true,
+    );
   });
 });
