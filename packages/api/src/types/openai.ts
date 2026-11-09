@@ -13,7 +13,13 @@ export type OpenAIModelOptions = Partial<OpenAIParameters>;
  * Configuration options for the getLLMConfig function
  */
 export interface OpenAIConfigOptions {
+  /** Validated extra inference wire fields. */
+  inferenceParameters?: Record<string, unknown>;
   modelOptions?: OpenAIModelOptions;
+  transportTimeouts?: {
+    bodyTimeout: number;
+    headersTimeout: number;
+  };
   directEndpoint?: boolean;
   reverseProxyUrl?: string | null;
   baseURLIsUserProvided?: boolean;
@@ -37,7 +43,7 @@ export type OAIClientOptions = Omit<OpenAIClientOptions, 'verbosity'> & {
   promptCache?: boolean;
   promptCacheTtl?: '5m' | '1h';
   /**
-   * Declares that this client talks to the first-party OpenAI surface, which is
+   * Declares that this client talks to a first-party OpenAI or Azure surface, which is
    * what gates the agents SDK's model-specific request constraints (GPT-6
    * Astra: Responses-only tool calls, rejected sampling parameters,
    * unsupported reasoning efforts). The SDK defaults them off and takes this as

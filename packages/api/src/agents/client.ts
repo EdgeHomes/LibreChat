@@ -42,7 +42,24 @@ export function payloadParser({
   if (isAgentsEndpoint(endpoint)) {
     return;
   }
-  return req.body?.endpointOption?.model_parameters;
+  const modelParameters = req.body?.endpointOption?.model_parameters;
+  if (modelParameters == null || req.reasoningOverrideBase == null) {
+    return modelParameters;
+  }
+
+  const { key, hadValue, value } = req.reasoningOverrideBase;
+  const persistedParameters = { ...modelParameters };
+  if (hadValue) {
+    persistedParameters[key] = value;
+  } else {
+    delete persistedParameters[key];
+  }
+  if (req.reasoningOverrideBase.thinkingHadValue === true) {
+    persistedParameters.thinking = req.reasoningOverrideBase.thinkingValue;
+  } else if (req.reasoningOverrideBase.thinkingHadValue === false) {
+    delete persistedParameters.thinking;
+  }
+  return persistedParameters;
 }
 
 /**
@@ -106,16 +123,24 @@ export function applyAttachmentOnlyText(
   formattedMessage.content = ATTACHMENT_ONLY_TEXT;
 }
 
-export function prependFileContext(
+/**
+ * Prepends context text to a formatted message: joined ahead of its string
+ * content or first text part, or added as a leading text part when it has
+ * neither. Array content is replaced, never edited in place: a formatted copy
+ * shares its array with the stored row it came from, so the stored row and
+ * every other reader of it stay untouched.
+ */
+export function prependContextText(
   formattedMessage: FormattedMessageWithContent,
-  fileContext?: string | null,
+  text: string | null | undefined,
+  separator = '\n',
 ): void {
-  if (!fileContext) {
+  if (!text) {
     return;
   }
 
   if (typeof formattedMessage.content === 'string') {
-    formattedMessage.content = `${fileContext}\n${formattedMessage.content}`;
+    formattedMessage.content = `${text}${separator}${formattedMessage.content}`;
     return;
   }
 
@@ -123,13 +148,24 @@ export function prependFileContext(
     return;
   }
 
-  const textPart = formattedMessage.content.find((part) => part.type === ContentTypes.TEXT);
-  if (textPart != null && typeof textPart.text === 'string') {
-    textPart.text = `${fileContext}\n${textPart.text}`;
+  const index = formattedMessage.content.findIndex(
+    (part) => part.type === ContentTypes.TEXT && typeof part.text === 'string',
+  );
+  if (index < 0) {
+    formattedMessage.content = [{ type: ContentTypes.TEXT, text }, ...formattedMessage.content];
     return;
   }
+  const textPart = formattedMessage.content[index];
+  formattedMessage.content = formattedMessage.content.map((part, position) =>
+    position === index ? { ...textPart, text: `${text}${separator}${textPart.text}` } : part,
+  );
+}
 
-  formattedMessage.content.unshift({ type: ContentTypes.TEXT, text: fileContext });
+export function prependFileContext(
+  formattedMessage: FormattedMessageWithContent,
+  fileContext?: string | null,
+): void {
+  prependContextText(formattedMessage, fileContext);
 }
 
 /**
@@ -262,35 +298,6 @@ function estimateDocumentBlockTokens(
   }
 
   return URL_DOCUMENT_FALLBACK_TOKENS;
-}
-
-/**
- * Estimates token cost for image and document blocks in a message's
- * content array. Covers: image_url, image, image_file, document, file.
- */
-export function estimateMediaTokensForMessage(
-  content: unknown,
-  isClaude: boolean,
-  getTokenCount?: (text: string) => number,
-): number {
-  if (!Array.isArray(content)) {
-    return 0;
-  }
-  let tokens = 0;
-  for (const block of content as ContentBlock[]) {
-    if (block == null || typeof block !== 'object' || typeof block.type !== 'string') {
-      continue;
-    }
-    const type = block.type;
-    if (type === 'image_url' || type === 'image' || type === 'image_file') {
-      tokens += estimateImageBlockTokens(block, isClaude);
-      continue;
-    }
-    if (type === 'document' || type === 'file') {
-      tokens += estimateDocumentBlockTokens(block, isClaude, getTokenCount);
-    }
-  }
-  return tokens;
 }
 
 /**
@@ -472,14 +479,6 @@ export function collectToolCallIds(
     }
   }
   return ids;
-}
-
-export function createTokenCounter(
-  encoding: Parameters<typeof Tokenizer.getTokenCount>[1],
-): TokenCounter {
-  return createMessageTokenCounter(encoding, (text: string) =>
-    Tokenizer.getTokenCount(text, encoding),
-  );
 }
 
 function createMessageTokenCounter(
