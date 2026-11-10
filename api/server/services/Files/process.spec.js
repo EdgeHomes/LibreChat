@@ -3794,6 +3794,7 @@ describe('fallback text for uploads left to tools', () => {
 
     expect(resolveUploadFallbackText).toHaveBeenCalledWith(
       expect.objectContaining({
+        req,
         file: req.file,
         fileId: 'file-uuid-csv',
         deliveryPath: 'none',
