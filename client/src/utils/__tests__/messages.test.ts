@@ -7,12 +7,11 @@ import {
   clearMessagesCache,
   clearArchivedConversationMessagesCache,
   clearDeletedConversationMessagesCache,
-  isValidTimestamp,
   getMessageAriaLabel,
-  getMessageTimestamp,
   getHeaderPrefixForScreenReader,
   areMessageFieldsEqual,
   areMessageRowPropsEqual,
+  isSameTailRelation,
   isSubmittableMessage,
   createDualMessageContent,
 } from '../messages';
@@ -222,73 +221,6 @@ describe('getHeaderPrefixForScreenReader', () => {
   });
 });
 
-describe('isValidTimestamp', () => {
-  it('returns false for missing values', () => {
-    expect(isValidTimestamp(undefined)).toBe(false);
-    expect(isValidTimestamp(null)).toBe(false);
-    expect(isValidTimestamp('')).toBe(false);
-  });
-
-  it('returns false for unparseable strings', () => {
-    expect(isValidTimestamp('not-a-date')).toBe(false);
-  });
-
-  it('returns true for ISO date strings', () => {
-    expect(isValidTimestamp('2026-06-12T15:42:00.000Z')).toBe(true);
-  });
-});
-
-describe('getMessageTimestamp', () => {
-  const NOW = new Date('2026-06-12T15:42:00.000Z').getTime();
-
-  beforeEach(() => {
-    jest.useFakeTimers().setSystemTime(NOW);
-  });
-
-  afterEach(() => {
-    jest.useRealTimers();
-  });
-
-  it('returns null for missing or invalid values', () => {
-    expect(getMessageTimestamp(undefined, 'en-US')).toBeNull();
-    expect(getMessageTimestamp(null, 'en-US')).toBeNull();
-    expect(getMessageTimestamp('not-a-date', 'en-US')).toBeNull();
-  });
-
-  it('formats relative and absolute time for a recent message', () => {
-    const twoHoursAgo = new Date(NOW - 2 * 60 * 60 * 1000).toISOString();
-    const result = getMessageTimestamp(twoHoursAgo, 'en-US');
-    expect(result).not.toBeNull();
-    expect(result?.relative).toBe('2 hours ago');
-    expect(result?.iso).toBe(twoHoursAgo);
-    expect(result?.absolute).toContain('2026');
-  });
-
-  it('flags messages under 24h as recent (prefer relative)', () => {
-    const justUnderADay = new Date(NOW - 23 * 60 * 60 * 1000).toISOString();
-    expect(getMessageTimestamp(justUnderADay, 'en-US')?.isRecent).toBe(true);
-  });
-
-  it('flags older messages as not recent (prefer absolute date)', () => {
-    const overADay = new Date(NOW - 25 * 60 * 60 * 1000).toISOString();
-    const monthAgo = new Date(NOW - 38 * 24 * 60 * 60 * 1000).toISOString();
-    expect(getMessageTimestamp(overADay, 'en-US')?.isRecent).toBe(false);
-    expect(getMessageTimestamp(monthAgo, 'en-US')?.isRecent).toBe(false);
-  });
-
-  it('uses "now" for the current instant', () => {
-    const result = getMessageTimestamp(new Date(NOW).toISOString(), 'en-US');
-    expect(result?.relative).toBe('now');
-    expect(result?.isRecent).toBe(true);
-  });
-
-  it('falls back to the default locale for a malformed locale tag', () => {
-    const iso = new Date(NOW - 60 * 1000).toISOString();
-    expect(() => getMessageTimestamp(iso, 'not a locale!!')).not.toThrow();
-    expect(getMessageTimestamp(iso, 'not a locale!!')).not.toBeNull();
-  });
-});
-
 const noop = () => {};
 /** Shared content reference so the baseline compares equal on `content` (which
  *  the comparator diffs BY REFERENCE); the mutation below hands a fresh array. */
@@ -326,6 +258,7 @@ const FIELD_MUTATIONS: Array<[string, Partial<TMessage>]> = [
   ['createdAt', { createdAt: '2026-07-02T00:00:00.000Z' }],
   ['depth', { depth: 3 }],
   ['isCreatedByUser', { isCreatedByUser: true }],
+  ['isUserSubmitted', { isUserSubmitted: true }],
   ['children length', { children: [makeFieldsMsg(), makeFieldsMsg()] }],
   ['content reference', { content: [] as TMessage['content'] }],
   ['model', { model: 'gpt-5' }],
@@ -408,6 +341,42 @@ describe('areMessageRowPropsEqual', () => {
         makeProps({ message: makeFieldsMsg({ text: 'edited' }) }),
       ),
     ).toBe(false);
+  });
+});
+
+describe('isSameTailRelation', () => {
+  const tailProps = (
+    messageId: string,
+    depth: number,
+    latestMessageId: string | undefined,
+    latestMessageDepth: number | undefined,
+  ) => ({
+    message: makeMessage({ messageId, depth }),
+    latestMessageId,
+    latestMessageDepth,
+  });
+
+  it('ignores a tail move that neither reaches nor leaves the row', () => {
+    expect(isSameTailRelation(tailProps('a', 1, 'b', 3), tailProps('a', 1, 'c_', 5))).toBe(true);
+    expect(isSameTailRelation(tailProps('a', 1, 'c_', 5), tailProps('a', 1, 'c', 5))).toBe(true);
+  });
+
+  it('re-renders the row the tail leaves', () => {
+    expect(isSameTailRelation(tailProps('b', 3, 'b', 3), tailProps('b', 3, 'c_', 5))).toBe(false);
+  });
+
+  it('re-renders the row the tail reaches', () => {
+    expect(isSameTailRelation(tailProps('c', 5, 'c_', 5), tailProps('c', 5, 'c', 5))).toBe(false);
+  });
+
+  it('re-renders when the tail depth reaches or leaves the row depth', () => {
+    expect(isSameTailRelation(tailProps('x', 3, 'b', 3), tailProps('x', 3, 'c', 5))).toBe(false);
+  });
+
+  it('re-renders when the tail becomes known or unknown', () => {
+    expect(isSameTailRelation(tailProps('a', 1, 'b', 3), tailProps('a', 1, undefined, 3))).toBe(
+      false,
+    );
   });
 });
 

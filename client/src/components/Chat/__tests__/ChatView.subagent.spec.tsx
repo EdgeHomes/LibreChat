@@ -20,44 +20,54 @@ jest.mock('react-hook-form', () => ({
 
 jest.mock('@librechat/client', () => ({
   Spinner: () => <div data-testid="spinner" />,
+  cn: (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' '),
 }));
 
 jest.mock('librechat-data-provider', () => ({
+  ...jest.requireActual('librechat-data-provider'),
   Constants: { NEW_CONVO: 'new', SEARCH: 'search' },
   buildTree: ({ messages }: { messages: unknown[] }) => messages,
 }));
 
+jest.mock('@librechat/chat/react', () => {
+  const actual = jest.requireActual('@librechat/chat/react');
+  return {
+    ...actual,
+    ChatSessionProvider: ({
+      children,
+    }: {
+      children: (session: { messages: unknown[]; isLoading: boolean }) => React.ReactNode;
+    }) => (
+      <actual.ChatContext.Provider value={{ conversation: mockConversation }}>
+        {children({ messages: [{ messageId: 'message-1' }], isLoading: false })}
+      </actual.ChatContext.Provider>
+    ),
+  };
+});
+
 jest.mock('~/hooks', () => ({
   useAddedResponse: () => ({}),
-  useResumeOnLoad: jest.fn(),
-  useAdaptiveSSE: jest.fn(),
-  useQueueDrain: jest.fn(),
-  useScrollbarGutterSeed: jest.fn(),
   useLocalize: () => (key: string) => key,
-  useChatHelpers: () => ({
-    conversation: mockConversation,
-    getMessages: jest.fn(),
-    ask: jest.fn(),
-  }),
+}));
+
+jest.mock('~/hooks/Chat/outcomes', () => ({
+  getMappingOptions: () => ({}),
 }));
 
 jest.mock('~/Providers', () => {
   const Passthrough = ({ children }: { children: React.ReactNode }) => <>{children}</>;
   const Context = { Provider: Passthrough };
   return {
-    ChatContext: Context,
     AddedChatContext: Context,
+    useChatContext: jest.requireActual('~/Providers/ChatContext').useChatContext,
     ChatFormProvider: Passthrough,
+    ComposerRestoreProvider: Passthrough,
     useFileMapContext: () => new Map(),
   };
 });
 
 jest.mock('~/data-provider', () => ({
-  useGetMessagesByConvoId: () => ({
-    data: [{ messageId: 'message-1' }],
-    isLoading: false,
-    isFetching: false,
-  }),
+  useProjectQuery: () => ({ data: undefined }),
 }));
 
 jest.mock('../Input/ConversationStarters', () => () => null);
@@ -67,10 +77,15 @@ jest.mock('../Presentation', () => ({ children }: { children: React.ReactNode })
 ));
 jest.mock('../Input/ChatForm', () => () => <div data-testid="chat-form" />);
 jest.mock('../Landing', () => () => <div data-testid="landing" />);
+jest.mock('~/components/Lia', () => () => null);
+jest.mock('../Trace', () => ({
+  TraceSurface: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 jest.mock('../Footer', () => ({
   __esModule: true,
   default: () => <div data-testid="footer" />,
   useConfiguredFooter: () => false,
+  useLandingFooter: () => true,
 }));
 jest.mock('../Header', () => ({ readOnly }: { readOnly?: boolean }) => (
   <div data-read-only={String(readOnly)} data-testid="header" />
@@ -83,8 +98,6 @@ jest.mock('~/utils', () => ({
 jest.mock('~/store', () => ({
   __esModule: true,
   default: {
-    submissionByIndex: jest.fn(),
-    isSubmittingFamily: jest.fn(),
     centerFormOnLanding: {},
   },
 }));
@@ -98,22 +111,6 @@ describe('ChatView child-thread execution identity', () => {
     mockConversation = {
       conversationId: 'child-thread',
       title: 'Graph child',
-      subagentThread: {
-        parentConversationId: 'parent-thread',
-      },
-    };
-
-    render(<ChatView />);
-
-    expect(screen.queryByTestId('chat-form')).not.toBeInTheDocument();
-    expect(screen.getByRole('note')).toHaveTextContent('com_ui_subagent_thread_read_only');
-    expect(screen.getByTestId('header')).toHaveAttribute('data-read-only', 'true');
-  });
-
-  it('keeps a saved-agent child view-only after it settles', () => {
-    mockConversation = {
-      conversationId: 'child-thread',
-      title: 'Saved agent child',
       subagentThread: {
         parentConversationId: 'parent-thread',
       },

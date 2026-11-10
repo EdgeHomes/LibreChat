@@ -1,8 +1,17 @@
-import type { SummaryContentPart } from './types/assistants';
+import type { SummaryContentPart } from './types/content';
 import type { ParentMessage } from './messages';
 import type { TFile } from './types/files';
 import type { TMessage } from './types';
-import { buildTree, findMessageById, isCompactedLeaf, isUserInitiatedCompaction } from './messages';
+import {
+  buildTree,
+  findMessageById,
+  isCompactedLeaf,
+  isFileAttachment,
+  isFileContentPart,
+  messageCarriesFiles,
+  hasContentPartFiles,
+  isUserInitiatedCompaction,
+} from './messages';
 import { ContentTypes } from './types/runs';
 
 const msg = (messageId: string, parentMessageId: string, over: Partial<TMessage> = {}): TMessage =>
@@ -203,6 +212,7 @@ describe('isCompactedLeaf', () => {
   const summary = (overrides: Record<string, unknown> = {}) => ({
     type: ContentTypes.SUMMARY,
     content: [{ type: ContentTypes.TEXT, text: 'checkpoint' }],
+    boundary: { messageId: 'step_summary', contentIndex: 0 },
     ...overrides,
   });
 
@@ -216,6 +226,7 @@ describe('isCompactedLeaf', () => {
     ['a summary next to text', [summary(), { type: ContentTypes.TEXT, text: 'reply' }]],
     ['a summary still streaming', [summary({ summarizing: true })]],
     ['a failed summary', [summary({ failed: true })]],
+    ['a streamed summary that never recorded a boundary', [summary({ boundary: undefined })]],
     ['an empty summary', [summary({ content: [] })]],
   ])('is false for %s', (_label, content) => {
     expect(isCompactedLeaf({ content } as TMessage)).toBe(false);
@@ -283,5 +294,61 @@ describe('isUserInitiatedCompaction', () => {
     ['no content', undefined],
   ])('is false for %s', (_label, content) => {
     expect(isUserInitiatedCompaction({ content } as TMessage)).toBe(false);
+  });
+});
+
+type Content = NonNullable<TMessage['content']>;
+
+describe('messageCarriesFiles', () => {
+  it('finds uploads, file-backed attachments and file references in content', () => {
+    expect(messageCarriesFiles({ files: [{ file_id: 'upload' }] })).toBe(true);
+    expect(
+      messageCarriesFiles({
+        attachments: [{ file_id: 'chart', toolCallId: 't' }] as TMessage['attachments'],
+      }),
+    ).toBe(true);
+    expect(
+      messageCarriesFiles({
+        content: [
+          { type: ContentTypes.STEER, steer: 'use this', files: [{ file_id: 'steered' }] },
+        ] as Content,
+      }),
+    ).toBe(true);
+    expect(
+      messageCarriesFiles({
+        content: [{ type: ContentTypes.IMAGE_FILE, image_file: { file_id: 'img' } }] as Content,
+      }),
+    ).toBe(true);
+  });
+
+  it('ignores empty lists, search sources and plain content', () => {
+    expect(messageCarriesFiles({ files: [] })).toBe(false);
+    expect(
+      messageCarriesFiles({
+        attachments: [{ type: 'web_search', toolCallId: 't' }] as TMessage['attachments'],
+      }),
+    ).toBe(false);
+    expect(
+      messageCarriesFiles({
+        content: [
+          { type: ContentTypes.TEXT, text: 'hello' },
+          { type: ContentTypes.STEER, steer: 'and this', files: [] },
+        ] as Content,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('file reference predicates', () => {
+  it('recognizes each locator shape replay reads', () => {
+    /** Provider-native locators that persisted rows carry outside the typed content union. */
+    expect(isFileContentPart({ file: { file_id: 'f' } })).toBe(true);
+    expect(isFileContentPart({ file_id: 'f' })).toBe(true);
+    expect(isFileContentPart({ type: ContentTypes.TEXT, text: 'x' } as Content[number])).toBe(
+      false,
+    );
+    expect(isFileContentPart(undefined)).toBe(false);
+    expect(hasContentPartFiles(null)).toBe(false);
+    expect(isFileAttachment(undefined)).toBe(false);
   });
 });

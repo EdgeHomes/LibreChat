@@ -34,15 +34,40 @@ const mockHandlers = {
   ),
   updateSettings: jest.fn((_req, res) => res.status(200).json({ environment: { id: 'code-1' } })),
   remove: jest.fn((_req, res) => res.status(200).json({ environment: { id: 'code-1' } })),
+  moveConversationDecision: jest.fn((_req, res) =>
+    res.status(200).json({ conversationId: 'convo-1' }),
+  ),
+};
+const mockGenerationJobManager = {
+  getJob: jest.fn(),
+  getCleanupBlockingJobIdsForConversations: jest.fn(),
+};
+let mockHandlerDeps;
+let mockSetupDeps;
+const mockModels = {
+  isAgentTriggerPrincipalActive: jest.fn(),
+  getConvoCodeEnvironmentDecision: jest.fn(),
+  replaceConvoCodeEnvironmentDecision: jest.fn(),
 };
 
 jest.mock('@librechat/data-schemas', () => ({
   SystemCapabilities: { MANAGE_CODE_ENVIRONMENTS: 'manage:code_environments' },
+  createBrowserSetupBackend: jest.fn(() => ({})),
 }));
 
 jest.mock('@librechat/api', () => ({
+  GenerationJobManager: mockGenerationJobManager,
+  createCodeSetupRouter: jest.fn((deps) => {
+    mockSetupDeps = deps;
+    const router = require('express').Router();
+    router.get('/capabilities', (_req, res) => res.json({ browserEnrollmentVersion: 1 }));
+    return router;
+  }),
   createCodeEnvironmentRegistry: jest.fn(() => mockRegistry),
-  createCodeEnvironmentHttpHandlers: jest.fn(() => mockHandlers),
+  createCodeEnvironmentHttpHandlers: jest.fn((deps) => {
+    mockHandlerDeps = deps;
+    return mockHandlers;
+  }),
   codeEnvironmentPairingLimiter: mockCodeEnvironmentPairingLimiter,
   codeEnvironmentStatusIpLimiter: mockCodeEnvironmentStatusIpLimiter,
   codeEnvironmentStatusLimiter: mockCodeEnvironmentStatusLimiter,
@@ -51,12 +76,17 @@ jest.mock('@librechat/api', () => ({
 jest.mock('~/server/middleware/roles/capabilities', () => ({
   requireCapability: mockRequireCapability,
 }));
-jest.mock('~/server/middleware', () => ({ requireJwtAuth: mockRequireJwtAuth }));
+jest.mock('~/server/middleware', () => ({
+  requireJwtAuth: mockRequireJwtAuth,
+  requireSameOrigin: jest.fn((_req, _res, next) => next()),
+  checkBan: jest.fn((_req, _res, next) => next()),
+}));
+jest.mock('~/cache/getLogStores', () => jest.fn(() => ({ get: jest.fn() })));
 jest.mock('~/server/services/Config', () => ({
   getAppConfig: jest.fn(),
   getCodeEnvironmentRegistry: mockGetCodeEnvironmentRegistry,
 }));
-jest.mock('~/models', () => ({ isAgentTriggerPrincipalActive: jest.fn() }));
+jest.mock('~/models', () => mockModels);
 
 function createApp() {
   delete require.cache[require.resolve('./code-environments')];
@@ -77,6 +107,17 @@ describe('code environment routes', () => {
     createApp();
 
     expect(mockGetCodeEnvironmentRegistry).not.toHaveBeenCalled();
+  });
+
+  it('mounts machine setup before the browser JWT boundary without initializing the registry', async () => {
+    await request(createApp()).get('/api/code-environments/setup/capabilities').expect(200, {
+      browserEnrollmentVersion: 1,
+    });
+    expect(mockRequireJwtAuth).not.toHaveBeenCalled();
+    expect(mockGetCodeEnvironmentRegistry).not.toHaveBeenCalled();
+    expect(mockSetupDeps.requireJwtAuth).toBe(mockRequireJwtAuth);
+    expect(mockSetupDeps.requireSameOrigin).toEqual(expect.any(Function));
+    expect(mockSetupDeps.checkBan).toEqual(expect.any(Function));
   });
 
   it('allows authenticated discovery without the management capability', async () => {
@@ -131,5 +172,24 @@ describe('code environment routes', () => {
 
     expect(middlewareCalls).toEqual(['jwt']);
     expect(mockHandlers.updateSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('rate-limits an authenticated owner moving a conversation code environment', async () => {
+    await request(createApp())
+      .patch('/api/code-environments/conversations/convo-1/decision')
+      .send({ from: [], to: [] })
+      .expect(200, { conversationId: 'convo-1' });
+
+    expect(middlewareCalls).toEqual(['jwt', 'status-ip-limit', 'status-limit']);
+    expect(mockHandlers.moveConversationDecision).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives the handlers owner-scoped conversation reads and conversation-scoped generations', async () => {
+    await request(createApp()).get('/api/code-environments').expect(200);
+
+    const { conversations, generations } = mockHandlerDeps;
+    expect(conversations.get).toBe(mockModels.getConvoCodeEnvironmentDecision);
+    expect(conversations.replaceDecision).toBe(mockModels.replaceConvoCodeEnvironmentDecision);
+    expect(generations).toBe(mockGenerationJobManager);
   });
 });
