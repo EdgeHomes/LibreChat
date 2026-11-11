@@ -330,6 +330,7 @@ export type TUser = {
   personalization?: {
     memories?: boolean;
     statefulCodeEnvironment?: StatefulCodeEnvironment;
+    defaultModelSpec?: string;
   };
   department?: string;
   jobTitle?: string;
@@ -337,8 +338,10 @@ export type TUser = {
   updatedAt: string;
 };
 
+/** Send any subset; `defaultModelSpec: ''` clears the pick back to the config default. */
 export type TUpdateUserPreferencesRequest = {
-  statefulCodeEnvironment: StatefulCodeEnvironment;
+  statefulCodeEnvironment?: StatefulCodeEnvironment;
+  defaultModelSpec?: string;
 };
 
 export type TUpdateUserPreferencesResponse = {

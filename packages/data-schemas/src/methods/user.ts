@@ -196,6 +196,7 @@ export function createUserMethods(
     userId: string,
     environment: StatefulCodeEnvironment,
   ) => Promise<IUser | null>;
+  updateUserDefaultModelSpec: (userId: string, specName: string) => Promise<IUser | null>;
 } {
   /**
    * Normalizes email fields in search criteria to lowercase and trimmed.
@@ -880,6 +881,25 @@ export function createUserMethods(
     return updated;
   }
 
+  /** Sets the user's new-chat model spec; an empty name unsets it. */
+  async function updateUserDefaultModelSpec(
+    userId: string,
+    specName: string,
+  ): Promise<IUser | null> {
+    const User = mongoose.models.User;
+    const update = specName
+      ? { $set: { 'personalization.defaultModelSpec': specName } }
+      : { $unset: { 'personalization.defaultModelSpec': '' } };
+    const updated = await User.findByIdAndUpdate(userId, update, {
+      new: true,
+      runValidators: true,
+    }).lean<IUser>();
+    if (updated) {
+      await invalidateAuthUserDocCache(userId);
+    }
+    return updated;
+  }
+
   /**
    * Search for users by word prefix of name, email, or username (see `buildUserSearchFilter`)
    * @param searchPattern - The pattern to search for
@@ -1056,6 +1076,7 @@ export function createUserMethods(
     updateUserPlugins,
     toggleUserMemories,
     updateUserStatefulCodeEnvironment,
+    updateUserDefaultModelSpec,
   };
 }
 

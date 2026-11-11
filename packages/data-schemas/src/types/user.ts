@@ -77,6 +77,7 @@ export interface IUser extends Document {
   personalization?: {
     memories?: boolean;
     statefulCodeEnvironment?: StatefulCodeEnvironment;
+    defaultModelSpec?: string;
   };
   favorites?: TUserFavorite[];
   /** Display order for the sidebar's Pinned section: favorite and pinned-chat
