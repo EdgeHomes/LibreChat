@@ -66,6 +66,7 @@ export interface SettingsContextValue {
   replyNotificationsAllowed: boolean;
   replyNotificationSoundAllowed: boolean;
   analyticsConfigured: boolean;
+  hasModelSpecs: boolean;
 }
 
 export interface SettingEntry {

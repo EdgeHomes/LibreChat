@@ -94,7 +94,21 @@ export type TModelSpec = {
   mcpServers?: string[];
   skills?: boolean | string[];
   subagents?: ModelSpecSubagentsConfig;
+  /** Ratings shown in the model selector's `?` hover card. */
+  helpText?: TModelSpecHelpText;
 };
+
+export const modelSpecRatingSchema = z.enum(['low', 'medium', 'high']);
+export type TModelSpecRating = z.infer<typeof modelSpecRatingSchema>;
+
+export const modelSpecHelpTextSchema = z.object({
+  cost: modelSpecRatingSchema.optional(),
+  speed: modelSpecRatingSchema.optional(),
+  complexity: modelSpecRatingSchema.optional(),
+  /** Free text shown under the ratings. */
+  notes: z.string().optional(),
+});
+export type TModelSpecHelpText = z.infer<typeof modelSpecHelpTextSchema>;
 
 type EphemeralToolToggles = Pick<
   TEphemeralAgent,
@@ -228,6 +242,7 @@ export const tModelSpecSchema = z.object({
   mcpServers: z.array(z.string()).optional(),
   skills: z.union([z.boolean(), z.array(z.string())]).optional(),
   subagents: modelSpecSubagentsSchema.optional(),
+  helpText: modelSpecHelpTextSchema.optional(),
 });
 
 /**

@@ -9,6 +9,7 @@ import { useModelSelectorContext } from '../ModelSelectorContext';
 import { CustomMenuItem as MenuItem } from '../CustomMenu';
 import { cn, getSpecAgentAvatarURL } from '~/utils';
 import SpecDescription from './SpecDescription';
+import SpecHelp from './SpecHelp';
 import SpecIcon from './SpecIcon';
 
 interface ModelSpecItemProps {
@@ -64,6 +65,7 @@ export function ModelSpecItem({ spec, isSelected, posInSet, setSize }: ModelSpec
           <SpecDescription description={spec.description} />
         </div>
       </div>
+      <SpecHelp spec={spec} />
       <button
         type="button"
         tabIndex={isActive ? 0 : -1}

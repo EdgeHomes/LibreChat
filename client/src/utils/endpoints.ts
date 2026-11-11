@@ -15,6 +15,7 @@ import {
 } from 'librechat-data-provider';
 import type * as t from 'librechat-data-provider';
 import type { LocalizeFunction } from '~/common';
+import { DEFAULT_MODEL_SPEC_KEY } from '~/store/defaultModel';
 import { getTimestampedValue } from './timestamps';
 import { getAgentAvatarUrl } from './agents';
 
@@ -444,6 +445,21 @@ export function applyModelSpecEphemeralAgent({
  * map means the list is unknown and leaves the pick trusted; gate on
  * `defaultSpecAwaitsAgents` to defer the decision until the map settles.
  */
+/**
+ * The user's chosen default spec while it is still offered to them, otherwise the
+ * config's `default: true` spec — so a removed or revoked pick falls back silently.
+ */
+export function findDefaultSpec(list: t.TModelSpec[]): t.TModelSpec | undefined {
+  let name: unknown = '';
+  try {
+    name = JSON.parse(localStorage.getItem(DEFAULT_MODEL_SPEC_KEY) ?? '""');
+  } catch {
+    name = '';
+  }
+  const userSpec = name ? list.find((spec) => spec.name === name) : undefined;
+  return userSpec ?? list.find((spec) => spec.default);
+}
+
 export function getDefaultModelSpec(
   startupConfig?: t.TStartupConfig,
   endpointsConfig?: t.TEndpointsConfig,
@@ -461,7 +477,7 @@ export function getDefaultModelSpec(
     return;
   }
 
-  const defaultSpec = list.find((spec) => spec.default);
+  const defaultSpec = findDefaultSpec(list);
   if (defaultSpec) {
     return { default: defaultSpec };
   }
@@ -518,7 +534,7 @@ export function defaultSpecAwaitsAgents(
   endpointsConfig?: t.TEndpointsConfig,
 ): boolean {
   const list = startupConfig?.modelSpecs?.list;
-  if (!list || list.some((spec) => spec.default) || !list.some((spec) => spec.softDefault)) {
+  if (!list || findDefaultSpec(list) != null || !list.some((spec) => spec.softDefault)) {
     return false;
   }
 

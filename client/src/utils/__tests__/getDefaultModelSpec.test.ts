@@ -695,3 +695,32 @@ describe('defaultSpecAwaitsAgents', () => {
     ).toBe(false);
   });
 });
+
+describe('user default model spec', () => {
+  const orgDefault = createModelSpec('org-default', { default: true });
+  const other = createModelSpec('other');
+  const pick = (name: string) => localStorage.setItem('defaultModelSpec', JSON.stringify(name));
+
+  beforeEach(() => localStorage.clear());
+
+  it('prefers the user pick over the config default', () => {
+    pick('other');
+    expect(getDefaultModelSpec(createStartupConfig([orgDefault, other]))).toEqual({
+      default: other,
+    });
+  });
+
+  it('falls back to the config default when the pick is no longer offered', () => {
+    pick('removed-spec');
+    expect(getDefaultModelSpec(createStartupConfig([orgDefault, other]))).toEqual({
+      default: orgDefault,
+    });
+  });
+
+  it('follows the config default when the pick is cleared', () => {
+    pick('');
+    expect(getDefaultModelSpec(createStartupConfig([orgDefault, other]))).toEqual({
+      default: orgDefault,
+    });
+  });
+});

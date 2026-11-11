@@ -66,6 +66,7 @@ export function useSettingsContext(): SettingsContextValue {
   const analyticsConfigured =
     hasAnalyticsGtmId(startupConfig?.analyticsGtmId) &&
     startupConfig?.interface?.analyticsConsent !== false;
+  const hasModelSpecs = (startupConfig?.modelSpecs?.list?.length ?? 0) > 0;
   const hasRemoteAgentsBool = hasRemoteAgents === true;
   const hasMultiConvoBool = hasMultiConvo === true;
   const hasPromptsBool = hasPrompts === true;
@@ -102,6 +103,7 @@ export function useSettingsContext(): SettingsContextValue {
       replyNotificationsAllowed,
       replyNotificationSoundAllowed,
       analyticsConfigured,
+      hasModelSpecs,
     }),
     [
       balanceEnabled,
@@ -130,6 +132,7 @@ export function useSettingsContext(): SettingsContextValue {
       replyNotificationsAllowed,
       replyNotificationSoundAllowed,
       analyticsConfigured,
+      hasModelSpecs,
     ],
   );
 }
