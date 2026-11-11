@@ -49,6 +49,7 @@ import {
 import { resetChatFilterSessionAtom } from '~/components/Conversations/chatFilters';
 import { TAuthConfig, TUserContext, TAuthContext, TResError } from '~/common';
 import { resetFacetsAtom } from '~/components/Conversations/facets';
+import { defaultModelSpecAtom } from '~/store/defaultModel';
 import useTimeout from './useTimeout';
 import store from '~/store';
 
@@ -95,7 +96,19 @@ const AuthContextProvider = ({
 }) => {
   const isExternalRedirectRef = useRef(false);
   const prerenderRefreshDeferredRef = useRef(false);
-  const [user, setUser] = useRecoilState(store.user);
+  const [user, setUserState] = useRecoilState(store.user);
+  /** Every user change mirrors the account's default model into the synchronous store new
+   * chats read, before any route renders with the new user; logout clears it. */
+  const setUser = useCallback(
+    (nextUser: t.TUser | undefined) => {
+      setUserState(nextUser);
+      getDefaultStore().set(
+        defaultModelSpecAtom,
+        nextUser?.personalization?.defaultModelSpec ?? '',
+      );
+    },
+    [setUserState],
+  );
   const logoutRedirectRef = useRef<string | undefined>(undefined);
   const [token, setToken] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);

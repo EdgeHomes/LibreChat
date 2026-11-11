@@ -35,6 +35,7 @@ import { toggleControl, ThemeSetting, LangSetting } from './controls';
 import BackupCodesItem from '../SettingsTabs/Account/BackupCodesItem';
 import { EngineSTTSetting, EngineTTSSetting } from './SpeechControls';
 import UiScaleSelector from '../SettingsTabs/General/UiScaleSelector';
+import DefaultModelSelector from '../SettingsTabs/Chat/DefaultModel';
 import FontSizeSelector from '../SettingsTabs/Chat/FontSizeSelector';
 import ChatTitleInTab from '../SettingsTabs/General/ChatTitleInTab';
 import AdvancedPrompts from '../SettingsTabs/Chat/AdvancedPrompts';
@@ -283,6 +284,15 @@ export const registry: SettingEntry[] = [
   },
 
   // Chat · Sending
+  {
+    id: 'defaultModel',
+    tab: CHAT,
+    section: 'sending',
+    labelKey: 'com_nav_default_model',
+    keywords: ['model', 'default', 'spec', 'new chat'],
+    show: (ctx) => ctx.hasModelSpecs,
+    Component: DefaultModelSelector,
+  },
   {
     id: 'enterToSend',
     tab: CHAT,

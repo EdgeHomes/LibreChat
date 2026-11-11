@@ -28,12 +28,13 @@ const {
 } = require('~/server/middleware');
 
 const settings = require('./settings');
-const { updateUserStatefulCodeEnvironment } = require('~/models');
+const { updateUserStatefulCodeEnvironment, updateUserDefaultModelSpec } = require('~/models');
 
 const router = express.Router();
 
 const updateUserPreferences = createUserPreferencesHandler({
   updateStatefulCodeEnvironment: updateUserStatefulCodeEnvironment,
+  updateDefaultModelSpec: updateUserDefaultModelSpec,
 });
 
 router.use('/settings', settings);

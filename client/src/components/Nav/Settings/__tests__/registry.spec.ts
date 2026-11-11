@@ -33,6 +33,7 @@ const settingsContext: SettingsContextValue = {
   replyNotificationsAllowed: true,
   replyNotificationSoundAllowed: true,
   analyticsConfigured: false,
+  hasModelSpecs: false,
 };
 
 const policyProviders = ['local', 'ldap', null, undefined];

@@ -191,6 +191,11 @@ const userSchema: Schema<IUser> = new Schema<IUser>(
           enum: STATEFUL_CODE_ENVIRONMENTS,
           default: 'user',
         },
+        /** Model spec name for new chats; ignored by the client once the spec is no longer offered. */
+        defaultModelSpec: {
+          type: String,
+          maxlength: 256,
+        },
       },
       default: {},
     },

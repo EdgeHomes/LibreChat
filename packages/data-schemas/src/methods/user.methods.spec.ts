@@ -2142,6 +2142,49 @@ describe('User Methods - Database Tests', () => {
     });
   });
 
+  describe('updateUserDefaultModelSpec', () => {
+    test('sets and unsets the pick without touching other preferences', async () => {
+      const user = await User.create({
+        email: 'default-model@example.com',
+        provider: 'local',
+        personalization: { memories: false, statefulCodeEnvironment: 'agent-user' },
+      });
+      const userId = user._id?.toString() ?? '';
+
+      const set = await methods.updateUserDefaultModelSpec(userId, 'opus');
+      expect(set?.personalization).toMatchObject({
+        memories: false,
+        statefulCodeEnvironment: 'agent-user',
+        defaultModelSpec: 'opus',
+      });
+
+      const cleared = await methods.updateUserDefaultModelSpec(userId, '');
+      expect(cleared?.personalization?.defaultModelSpec).toBeUndefined();
+      expect(cleared?.personalization?.statefulCodeEnvironment).toBe('agent-user');
+    });
+
+    test('invalidates cached auth user documents', async () => {
+      enableAuthUserDocCache();
+      const user = await User.create({
+        email: 'cached-default-model@example.com',
+        provider: 'openid',
+      });
+      const userId = user._id?.toString() ?? '';
+      const cache = {
+        set: jest.fn().mockResolvedValue(true),
+        get: jest.fn().mockResolvedValue(['auth-cache-key-b']),
+        delete: jest.fn().mockResolvedValue(true),
+      };
+      const methodsWithCache = createUserMethods(mongoose, {
+        getCache: jest.fn().mockReturnValue(cache),
+      });
+
+      await methodsWithCache.updateUserDefaultModelSpec(userId, 'haiku');
+
+      expect(cache.delete).toHaveBeenCalledWith('auth-cache-key-b');
+    });
+  });
+
   describe('Email Normalization Edge Cases', () => {
     test('should handle email with multiple spaces', async () => {
       await User.create({

@@ -11,9 +11,9 @@ import {
 import type { TStartupConfig, TUser } from 'librechat-data-provider';
 import { cleanupTimestampedStorage } from '~/utils/timestamps';
 import useSpeechSettingsInit from './useSpeechSettingsInit';
+import { setDocumentTitle, findDefaultSpec } from '~/utils';
 import { useHasAccess, useCatalogReady } from '~/hooks';
 import { useMCPServersQuery } from '~/data-provider';
-import { setDocumentTitle } from '~/utils';
 import store from '~/store';
 
 export default function useAppStartup({
@@ -62,7 +62,7 @@ export default function useAppStartup({
       return;
     }
 
-    const defaultSpec = modelSpecs.find((spec) => spec.default);
+    const defaultSpec = findDefaultSpec(modelSpecs);
 
     if (!defaultSpec) {
       return;

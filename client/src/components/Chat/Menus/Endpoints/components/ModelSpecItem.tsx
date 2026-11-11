@@ -9,6 +9,7 @@ import { useModelSelectorContext } from '../ModelSelectorContext';
 import { CustomMenuItem as MenuItem } from '../CustomMenu';
 import { cn, getSpecAgentAvatarURL } from '~/utils';
 import SpecDescription from './SpecDescription';
+import SpecHelp from './SpecHelp';
 import SpecIcon from './SpecIcon';
 
 interface ModelSpecItemProps {
@@ -64,6 +65,7 @@ export function ModelSpecItem({ spec, isSelected, posInSet, setSize }: ModelSpec
           <SpecDescription description={spec.description} />
         </div>
       </div>
+      <SpecHelp spec={spec} />
       <button
         type="button"
         tabIndex={isActive ? 0 : -1}
@@ -84,15 +86,15 @@ export function ModelSpecItem({ spec, isSelected, posInSet, setSize }: ModelSpec
       >
         <MorphIcon icon={isFavorite ? PinOff : Pin} className="h-4 w-4" />
       </button>
-      {isSelected && (
-        <>
-          <CheckCircle2
-            className="text-text-primary size-4 shrink-0 self-center"
-            aria-hidden="true"
-          />
-          <VisuallyHidden>{localize('com_a11y_selected')}</VisuallyHidden>
-        </>
-      )}
+      {/* Always holds the check's width so every row's trailing icons line up. */}
+      <span className="flex size-4 shrink-0 self-center">
+        {isSelected && (
+          <>
+            <CheckCircle2 className="text-text-primary size-4" aria-hidden="true" />
+            <VisuallyHidden>{localize('com_a11y_selected')}</VisuallyHidden>
+          </>
+        )}
+      </span>
     </MenuItem>
   );
 }
