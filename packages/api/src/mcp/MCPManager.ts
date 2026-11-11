@@ -84,6 +84,7 @@ import { isOwnedAbortError } from '~/utils/errors';
 import { markMCPToolResultError } from './status';
 import { withMCPRequestSignal } from './signal';
 import { MCPConnection } from './connection';
+import { applyPositionRole } from './position';
 import { mcpConfig } from './mcpConfig';
 
 function createOboToolCallErrorMessage(
@@ -1720,7 +1721,13 @@ Please follow these instructions when using tools from the respective MCP server
         const resolvedHeaders: Record<string, string> =
           'headers' in currentOptions ? { ...(currentOptions.headers || {}) } : {};
 
-        const oboConfig = rawConfig.obo;
+        /**
+         * Exchange the env-processed scope. `rawConfig.obo` still holds `${VAR}`
+         * placeholders; connect-time already expands them in `processMCPEnv`, and a
+         * tool call that sends the literal string is rejected by the IdP. User and
+         * plugin configs stay unexpanded inside `processMCPEnv`.
+         */
+        const oboConfig = currentOptions.obo ?? rawConfig.obo;
         const usesObo = Boolean(oboConfig && oboTokenResolver && user);
         let oboUpstreamTokenProvider = upstreamTokenProvider;
 
@@ -1804,6 +1811,16 @@ Please follow these instructions when using tools from the respective MCP server
             );
           }
           resolvedHeaders['Authorization'] = `Bearer ${oboTokens.access_token}`;
+          /**
+           * Tool-call fetches overlay these headers on the transport. The transport
+           * already replaced `{{LIBRECHAT_OBO_POSITION_ROLE}}` at connect time, but
+           * `processMCPEnv` leaves that placeholder in place, so the overlay would
+           * send it literally. Substitute from this call's OBO token before that.
+           */
+          Object.assign(
+            resolvedHeaders,
+            applyPositionRole({ ...resolvedHeaders }, oboTokens.access_token),
+          );
           /**
            * Runtime request headers do not reach a legacy SSE connection's event
            * stream — `eventSourceInit.fetch` bypasses `createFetchFunction` and sends
