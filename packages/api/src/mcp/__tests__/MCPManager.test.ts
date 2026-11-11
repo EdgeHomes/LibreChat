@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import jwt from 'jsonwebtoken';
 import { logger } from '@librechat/data-schemas';
 import {
   CallToolResultSchema,
@@ -3771,6 +3772,97 @@ describe('MCPManager', () => {
         }),
       );
       expect(mockConnection.client.request).toHaveBeenCalled();
+    });
+
+    it('exchanges the env-expanded OBO scope on a tool call', async () => {
+      const envName = 'MCP_OBO_TEST_SCOPE';
+      const previous = process.env[envName];
+      process.env[envName] = 'api://expanded-scope/.default';
+      mockProcessMCPEnv.mockImplementation(jest.requireActual('~/utils/env').processMCPEnv);
+      const config = {
+        ...serverConfig,
+        source: 'yaml' as const,
+        obo: { scopes: `\${${envName}}` },
+      };
+      mockResolveOboToken.mockResolvedValue({
+        access_token: 'fresh-obo-token',
+        token_type: 'Bearer',
+        obtained_at: Date.now(),
+        expires_at: Date.now() + 3600_000,
+      });
+      mockAppConnections({ get: jest.fn().mockResolvedValue(mockConnection) });
+      (mockRegistryInstance.getServerConfig as jest.Mock).mockResolvedValue(config);
+      const manager = await MCPManager.createInstance(newMCPServersConfig());
+      jest.spyOn(manager, 'getUserConnection').mockResolvedValue(mockConnection);
+
+      try {
+        await manager.callTool({
+          user: mockUser as IUser,
+          serverName,
+          toolName: 'test_tool',
+          provider: 'openai',
+          flowManager: mockFlowManager as unknown as Parameters<
+            typeof manager.callTool
+          >[0]['flowManager'],
+          oboTokenResolver: mockOboTokenResolver,
+          upstreamTokenProvider: mockUpstreamTokenProvider,
+        });
+      } finally {
+        if (previous === undefined) {
+          delete process.env[envName];
+        } else {
+          process.env[envName] = previous;
+        }
+      }
+
+      expect(mockResolveOboToken).toHaveBeenCalledWith(
+        mockUser,
+        expect.objectContaining({ scopes: 'api://expanded-scope/.default' }),
+        mockOboTokenResolver,
+        mockUpstreamTokenProvider,
+        undefined,
+        false,
+      );
+    });
+
+    it('sends the OBO token position role instead of the role placeholder', async () => {
+      const accessToken = jwt.sign(
+        { roles: ['SQL.Read', 'mcp-role.position.accountant'] },
+        'secret',
+      );
+      const config = {
+        ...serverConfig,
+        headers: { 'X-MS-API-ROLE': '{{LIBRECHAT_OBO_POSITION_ROLE}}' },
+      };
+      mockResolveOboToken.mockResolvedValue({
+        access_token: accessToken,
+        token_type: 'Bearer',
+        obtained_at: Date.now(),
+        expires_at: Date.now() + 3600_000,
+      });
+      mockAppConnections({ get: jest.fn().mockResolvedValue(mockConnection) });
+      (mockRegistryInstance.getServerConfig as jest.Mock).mockResolvedValue(config);
+      const manager = await MCPManager.createInstance(newMCPServersConfig());
+      jest.spyOn(manager, 'getUserConnection').mockResolvedValue(mockConnection);
+
+      await manager.callTool({
+        user: mockUser as IUser,
+        serverName,
+        toolName: 'test_tool',
+        provider: 'openai',
+        flowManager: mockFlowManager as unknown as Parameters<
+          typeof manager.callTool
+        >[0]['flowManager'],
+        oboTokenResolver: mockOboTokenResolver,
+        upstreamTokenProvider: mockUpstreamTokenProvider,
+      });
+
+      expect(mockConnection.setRequestHeaders).toHaveBeenCalledWith(
+        expect.objectContaining({
+          'X-MS-API-ROLE': 'mcp-role.position.accountant',
+          Authorization: `Bearer ${accessToken}`,
+        }),
+      );
     });
 
     it.each([undefined, new Error('owner stopped'), 'stopped'])(
