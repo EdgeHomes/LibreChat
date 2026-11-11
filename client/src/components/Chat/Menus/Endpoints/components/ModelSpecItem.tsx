@@ -86,15 +86,15 @@ export function ModelSpecItem({ spec, isSelected, posInSet, setSize }: ModelSpec
       >
         <MorphIcon icon={isFavorite ? PinOff : Pin} className="h-4 w-4" />
       </button>
-      {isSelected && (
-        <>
-          <CheckCircle2
-            className="text-text-primary size-4 shrink-0 self-center"
-            aria-hidden="true"
-          />
-          <VisuallyHidden>{localize('com_a11y_selected')}</VisuallyHidden>
-        </>
-      )}
+      {/* Always holds the check's width so every row's trailing icons line up. */}
+      <span className="flex size-4 shrink-0 self-center">
+        {isSelected && (
+          <>
+            <CheckCircle2 className="text-text-primary size-4" aria-hidden="true" />
+            <VisuallyHidden>{localize('com_a11y_selected')}</VisuallyHidden>
+          </>
+        )}
+      </span>
     </MenuItem>
   );
 }

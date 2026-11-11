@@ -108,6 +108,7 @@ const Dropdown: React.FC<DropdownProps> = ({
   const inDialog = useDialogDepth() > 0;
   const popoverZIndex = usePopoverZIndex();
   const [searchValue, setSearchValue] = useState('');
+  const isPortaled = portal ?? (portalElement != null || !inDialog);
 
   const handleChange = (value: string) => {
     onChange(value);
@@ -124,6 +125,8 @@ const Dropdown: React.FC<DropdownProps> = ({
     value: selectedValue,
     setValue: handleChange,
   });
+
+  const isOpen = selectProps.useState('open');
 
   const getOptionObject = (val: string | undefined): Option | undefined => {
     if (val == null || val === '') {
@@ -188,7 +191,12 @@ const Dropdown: React.FC<DropdownProps> = ({
   );
 
   return (
-    <div className={cn('relative max-w-full min-w-0', variant === 'field' && 'w-full', className)}>
+    <div
+      className={cn('relative max-w-full min-w-0', variant === 'field' && 'w-full', className)}
+      /* An unportaled list is confined to this wrapper's stacking context, where a later
+         sibling row with the same z-index would paint over it; lift the wrapper while open. */
+      style={isOpen && !isPortaled ? { zIndex: popoverZIndex } : undefined}
+    >
       <Select.Select
         store={selectProps}
         disabled={disabled}
@@ -249,7 +257,7 @@ const Dropdown: React.FC<DropdownProps> = ({
            child from assistive technology, so a list portaled out of it can be
            neither reached by keyboard nor read. Inside a dialog the list renders in
            place, as Ariakit menus already do, unless the caller asks otherwise. */
-        portal={portal ?? (portalElement != null || !inDialog)}
+        portal={isPortaled}
         portalElement={portalElement}
         store={selectProps}
         /* Escape belongs to the list while it is open. Marking it handled is how a container
