@@ -217,6 +217,12 @@ describe('createEndpointsConfigService', () => {
             endpoints: {
               [EModelEndpoint.agents]: {
                 allowedProviders: ['openAI', 'anthropic'],
+                sdkRuntimes: {
+                  private: {
+                    remote: { url: 'wss://private/sdk', secret: 'private-server-secret' },
+                    roles: ['ADMIN'],
+                  },
+                },
                 capabilities: [AgentCapabilities.execute_code],
                 maxSubagents: 20,
               },
@@ -229,7 +235,47 @@ describe('createEndpointsConfigService', () => {
 
       expect(result?.[EModelEndpoint.agents]?.allowedProviders).toEqual(['openAI', 'anthropic']);
       expect(result?.[EModelEndpoint.agents]?.maxSubagents).toBe(20);
+      expect(result?.[EModelEndpoint.agents]).not.toHaveProperty('sdkRuntimes');
     });
+
+    it.each([true, false, undefined])(
+      'exposes only channel availability to the agent builder when enabled=%s',
+      async (enabled) => {
+        const channels =
+          enabled == null
+            ? undefined
+            : {
+                enabled,
+                leaseMs: 60_000,
+                cleanup: { batchSize: 25 },
+                nativeSessions: true,
+                lifecycleReactions: true,
+                signatureToleranceSeconds: 60,
+                socketReconnectDelayMs: 100,
+                slackApp: {
+                  enabled: true,
+                  clientSecret: 'private-slack-client-secret',
+                  signingSecret: 'private-slack-signing-secret',
+                },
+              };
+        const deps = createMockDeps({
+          loadDefaultEndpointsConfig: jest.fn().mockResolvedValue({
+            [EModelEndpoint.agents]: { userProvide: false, order: 0 },
+          }),
+          getAppConfig: jest
+            .fn()
+            .mockResolvedValue(appConfig({ endpoints: { [EModelEndpoint.agents]: { channels } } })),
+        });
+        const { getEndpointsConfig } = createEndpointsConfigService(deps);
+
+        const result = await getEndpointsConfig(fakeReq());
+
+        expect(result?.[EModelEndpoint.agents]).toEqual(
+          expect.objectContaining({ channels: { enabled: enabled === true } }),
+        );
+        expect(JSON.stringify(result)).not.toContain('private-slack');
+      },
+    );
 
     it.each([true, false])(
       'exposes file sharing policy to the agent builder when enabled=%s',

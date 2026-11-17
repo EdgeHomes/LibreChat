@@ -1,10 +1,16 @@
-import { memo, useRef, useMemo, useEffect, useState, useCallback } from 'react';
+import { memo, useRef, useMemo, useEffect, useState, Suspense, useCallback } from 'react';
 import { useRecoilValue } from 'recoil';
 import { useWatch } from 'react-hook-form';
 import { useAtom, useAtomValue } from 'jotai';
 import { useNavigate } from 'react-router-dom';
 import { isInlineablePastedText } from '@librechat/chat';
 import { useDirection } from '@radix-ui/react-direction';
+import {
+  submitFromComposer,
+  composerClearance,
+  ComposerField,
+  ComposerFrame,
+} from '@librechat/chat/components';
 import {
   PastedTextDialog,
   QuoteButton,
@@ -24,13 +30,6 @@ import {
   isAgentsEndpoint,
   isAssistantsEndpoint,
 } from 'librechat-data-provider';
-import {
-  submitFromComposer,
-  composerClearance,
-  ComposerField,
-  ComposerFrame,
-  ComposerActions,
-} from '@librechat/chat/components';
 import type { TChatProject, TMessage, TConversation } from 'librechat-data-provider';
 import type { QueuedMessageContext } from '@librechat/chat';
 import type { SetterOrUpdater } from 'recoil';
@@ -66,12 +65,12 @@ import {
   PendingToolApprovalButton,
   PendingToolApprovalPanel,
 } from '~/components/Chat/approval/Review';
+import { onGreetingSettled, canClaimWelcomeFocus, isTouchFirst } from '../welcome';
 import useDiscardPastedFiles from '~/hooks/Files/useDiscardPastedFiles';
 import useComposerRestore from '~/hooks/Input/useComposerRestore';
 import { useChatSettings } from '~/Providers/ChatSettingsContext';
 import usePastedTextEdit from '~/hooks/Files/usePastedTextEdit';
 import useAskAnswerMode from '~/hooks/Input/useAskAnswerMode';
-import AskUserQuestionPopover from './AskUserQuestionPopover';
 import { useTargetContext } from '~/Providers/TargetContext';
 import useAttachTarget from '~/hooks/Input/useAttachTarget';
 import { chatDirectionAtom } from '~/store/chatDirection';
@@ -79,19 +78,28 @@ import ProjectLandingChip from '../ProjectLandingChip';
 import useHasAccess from '~/hooks/Roles/useHasAccess';
 import useDictation from '~/hooks/Input/useDictation';
 import { useGetStartupConfig } from '~/data-provider';
-import CodeWorkspaceMenu from './CodeWorkspaceMenu';
-import CodeApprovalMenu from './CodeApprovalMenu';
+import { lazyWithRecovery } from '~/lib/assets/lazy';
 import TextareaHeader from './TextareaHeader';
-import PromptsCommand from './PromptsCommand';
-import SkillsCommand from './SkillsCommand';
 import AutoPlayAudio from './AutoPlayAudio';
 import { mainTextareaId } from '~/common';
-import ToolDialogs from './ToolDialogs';
+import Actions from './Composer/Actions';
 import Queue from './Composer/Queue';
 import Tray from './Composer/Tray';
 import Bar from './Composer/Bar';
-import Mention from './Mention';
 import store from '~/store';
+
+/**
+ * The composer's popovers, dialogs and code-workspace controls render nothing until a trigger
+ * (`/`, `@`, `+`, an ask, an approval, a workspace), so they load after the chat has painted
+ * instead of with it. Each sits under a null Suspense fallback: it shows nothing either way.
+ */
+const AskUserQuestionPopover = lazyWithRecovery(() => import('./AskUserQuestionPopover'));
+const CodeWorkspaceMenu = lazyWithRecovery(() => import('./CodeWorkspaceMenu'));
+const CodeApprovalMenu = lazyWithRecovery(() => import('./CodeApprovalMenu'));
+const PromptsCommand = lazyWithRecovery(() => import('./PromptsCommand'));
+const SkillsCommand = lazyWithRecovery(() => import('./SkillsCommand'));
+const ToolDialogs = lazyWithRecovery(() => import('./ToolDialogs'));
+const Mention = lazyWithRecovery(() => import('./Mention'));
 
 interface ChatFormProps {
   index: number;
@@ -226,6 +234,21 @@ const ChatForm = memo(function ChatForm({
     }
     textAreaRef.current?.focus();
   }, []);
+
+  /** The welcome screen hands the composer its focus once the greeting has finished
+   * landing, so the caret arrives as the screen settles rather than before it. The cue
+   * is a timer, so it is honoured only while nothing else holds focus or has a popup
+   * open (`canClaimWelcomeFocus`), and never on a touchscreen, where focus would raise
+   * the keyboard over the welcome screen. Only the welcome screen announces it. */
+  useEffect(
+    () =>
+      onGreetingSettled(() => {
+        if (!isTouchFirst() && canClaimWelcomeFocus()) {
+          textAreaRef.current?.focus();
+        }
+      }),
+    [],
+  );
 
   /** Actions that consume the composer from inside a popup (the during-run
    * hovercard) sit in exempted popup content, so they restore focus themselves. */
@@ -519,11 +542,11 @@ const ChatForm = memo(function ChatForm({
   const canStop = steering.canControlGeneration || isAssistantsEndpoint(endpoint);
 
   /* Memoized for `memo(Bar)`: an inline element is a new identity every render,
-     and this component re-renders on every keystroke. */
+     and this component re-renders on every keystroke. `Actions` reads the draft
+     itself, so nothing here changes with it. */
   const actionSlot = useMemo(
     () => (
-      <ComposerActions
-        text={textValue ?? ''}
+      <Actions
         submitButtonRef={submitButtonRef}
         isSubmitting={isSubmitting}
         answersAsk={answerMode.composerAnswers}
@@ -554,7 +577,6 @@ const ChatForm = memo(function ChatForm({
       />
     ),
     [
-      textValue,
       isSubmitting,
       answerMode.composerAnswers,
       answerMode.composerLocked,
@@ -577,6 +599,37 @@ const ChatForm = memo(function ChatForm({
       setShowStopButton,
       handleStopGenerating,
       canStop,
+    ],
+  );
+
+  const approvalSlot = useMemo(
+    () => (
+      <div className="flex items-center gap-1.5 empty:hidden">
+        <Suspense fallback={null}>
+          <CodeApprovalMenu
+            conversation={conversation}
+            addedConversation={addedConvo}
+            codeEnvironmentMode={codeWorkspace.mode}
+            setConversation={setConversation}
+            disabled={disableInputs}
+          />
+        </Suspense>
+        {index === 0 && conversationId != null && (
+          <PendingToolApprovalButton
+            conversationId={conversationId}
+            triggerRef={approvalTriggerRef}
+          />
+        )}
+      </div>
+    ),
+    [
+      conversation,
+      addedConvo,
+      codeWorkspace.mode,
+      setConversation,
+      disableInputs,
+      index,
+      conversationId,
     ],
   );
 
@@ -644,11 +697,13 @@ const ChatForm = memo(function ChatForm({
             {project ? <ProjectLandingChip project={project} /> : null}
             {codeWorkspace.visible ? (
               <div className="min-w-0">
-                <CodeWorkspaceMenu
-                  setConversation={setConversation}
-                  workspace={codeWorkspace}
-                  disabled={disableInputs || isSubmitting}
-                />
+                <Suspense fallback={null}>
+                  <CodeWorkspaceMenu
+                    setConversation={setConversation}
+                    workspace={codeWorkspace}
+                    disabled={disableInputs || isSubmitting}
+                  />
+                </Suspense>
               </div>
             ) : null}
           </>
@@ -656,24 +711,32 @@ const ChatForm = memo(function ChatForm({
       }
       popovers={
         <>
-          <Mention
-            index={index}
-            popoverAtom={plusPopoverAtom}
-            newConversation={generateConversation}
-            textAreaRef={textAreaRef}
-            commandChar="+"
-            placeholder="com_ui_add_model_preset"
-            includeAssistants={false}
-          />
-          <Mention
-            index={index}
-            popoverAtom={mentionPopoverAtom}
-            newConversation={newConversation}
-            textAreaRef={textAreaRef}
-          />
-          <PromptsCommand index={index} textAreaRef={textAreaRef} submitPrompt={submitPrompt} />
+          <Suspense fallback={null}>
+            <Mention
+              index={index}
+              popoverAtom={plusPopoverAtom}
+              newConversation={generateConversation}
+              textAreaRef={textAreaRef}
+              commandChar="+"
+              placeholder="com_ui_add_model_preset"
+              includeAssistants={false}
+            />
+          </Suspense>
+          <Suspense fallback={null}>
+            <Mention
+              index={index}
+              popoverAtom={mentionPopoverAtom}
+              newConversation={newConversation}
+              textAreaRef={textAreaRef}
+            />
+          </Suspense>
+          <Suspense fallback={null}>
+            <PromptsCommand index={index} textAreaRef={textAreaRef} submitPrompt={submitPrompt} />
+          </Suspense>
           {index === 0 && (
-            <AskUserQuestionPopover conversationId={conversationId} textAreaRef={textAreaRef} />
+            <Suspense fallback={null}>
+              <AskUserQuestionPopover conversationId={conversationId} textAreaRef={textAreaRef} />
+            </Suspense>
           )}
           {index === 0 && conversationId != null && (
             <PendingToolApprovalPanel
@@ -681,12 +744,14 @@ const ChatForm = memo(function ChatForm({
               triggerRef={approvalTriggerRef}
             />
           )}
-          <SkillsCommand
-            index={index}
-            textAreaRef={textAreaRef}
-            conversationId={conversationId}
-            agentId={conversation?.agent_id}
-          />
+          <Suspense fallback={null}>
+            <SkillsCommand
+              index={index}
+              textAreaRef={textAreaRef}
+              conversationId={conversationId}
+              agentId={conversation?.agent_id}
+            />
+          </Suspense>
         </>
       }
       hints={
@@ -822,27 +887,13 @@ const ChatForm = memo(function ChatForm({
           showSpeech={SpeechToText}
           speechDisabled={speechDisabled}
           dictation={dictation}
-          approvalSlot={
-            <div className="flex items-center gap-1.5">
-              <CodeApprovalMenu
-                conversation={conversation}
-                addedConversation={addedConvo}
-                codeEnvironmentMode={codeWorkspace.mode}
-                setConversation={setConversation}
-                disabled={disableInputs}
-              />
-              {index === 0 && conversationId != null && (
-                <PendingToolApprovalButton
-                  conversationId={conversationId}
-                  triggerRef={approvalTriggerRef}
-                />
-              )}
-            </div>
-          }
+          approvalSlot={approvalSlot}
           actionSlot={actionSlot}
           hasAddedConversation={addedConvo != null}
         />
-        <ToolDialogs />
+        <Suspense fallback={null}>
+          <ToolDialogs />
+        </Suspense>
       </BadgeRowProvider>
       {TextToSpeech && automaticPlayback && <AutoPlayAudio index={index} />}
     </ComposerFrame>

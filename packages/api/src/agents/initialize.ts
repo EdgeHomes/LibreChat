@@ -125,6 +125,7 @@ import {
 } from '../projects/context';
 import { assertChatProjectInstructions, ChatProjectResourcesChangedError } from '../projects/turn';
 import { extractAgentContent, extractSkillContent } from '../protection/adapters/submissions';
+import { selectCodeFileGenerations, planCodeSnapshotMounts } from '~/files/code/destinations';
 import { createConfiguredContentInspector, inspectContent } from '../protection/runtime';
 import { assertAgentAttachmentLimits, isModelBoundAttachmentFile } from './attachments';
 import { assertModelBoundContent } from '../middleware/modelBoundContent';
@@ -135,6 +136,7 @@ import { registerMemoryTools, memoryToolUsageGuard } from './memory';
 import { isImplicitStatefulCodeRouteAvailable } from '~/code/config';
 import { applyIntentLabels, sanitizeIntentLabels } from './intent';
 import { prepareQueuedCodeFileContext } from '~/files/code/queued';
+import { getGoogleInputTokenLimit } from '~/endpoints/google/llm';
 import { ContentFilterError } from '../middleware/contentFilter';
 import { resolveToolRoleGrants } from '~/tools/rolePermissions';
 import { createRequestAgentExecutionContext } from './runtime';
@@ -147,6 +149,7 @@ import { resolveAgentCodeExecution } from '~/code/agent';
 import { hasActiveFileFieldPolicy } from '~/protection';
 import { applyBackgroundToolCalls } from './background';
 import { admitCurrentFileBudget } from './files/budget';
+import { allowsFileResource } from '~/files/consumers';
 import { applyDeferredToolLoading } from './deferral';
 import { applyTurnDelivery } from './files/delivery';
 import { generateArtifactsPrompt } from '~/prompts';
@@ -1923,12 +1926,44 @@ export async function initializeAgent(
     currentFiles = requestUsageFiles.concat(toolUsageFiles);
   }
   if (currentFiles?.length) {
-    /* Before any check reads the route: endpoint filtering, model-bound limits and content
-     * inspection below all have to judge each file by the route this turn delivers it by. */
     currentFiles = applyTurnDelivery(currentFiles, {
       routing: deliveryRouting,
       consumers: fileConsumers,
     });
+  }
+  const excludedCodeFileIds = new Set<string>();
+  let codeSnapshotMounts: Map<string, string> | undefined;
+  if (wantsCodeFiles) {
+    const membership = new Map<EToolResources, ReadonlySet<string>>([
+      [EToolResources.execute_code, new Set(agent.tool_resources?.execute_code?.file_ids)],
+      [EToolResources.file_search, new Set(agent.tool_resources?.file_search?.file_ids)],
+    ]);
+    const candidates = [...(currentFiles ?? []), ...deferredProvisionFiles].filter((file) =>
+      allowsFileResource(file, EToolResources.execute_code, membership),
+    );
+    const privateIds = new Set(
+      Object.values(agent.tool_resources ?? {}).flatMap((resource) => resource?.file_ids ?? []),
+    );
+    const selected = new Set(
+      selectCodeFileGenerations(
+        candidates,
+        privateIds,
+        codeExecutionContext.executionRouteKey ?? codeExecutionContext.executionProfile,
+      ).files.flatMap((file) => (file ? [file.file_id] : [])),
+    );
+    for (const file of candidates)
+      if (!selected.has(file.file_id)) excludedCodeFileIds.add(file.file_id);
+    codeSnapshotMounts = planCodeSnapshotMounts(
+      candidates.filter((file) => selected.has(file.file_id)),
+      privateIds,
+      codeExecutionContext.executionRouteKey ?? codeExecutionContext.executionProfile,
+    );
+    const needed = (file: IMongoFile | TFile): boolean =>
+      !excludedCodeFileIds.has(file.file_id) ||
+      isModelBoundAttachmentFile(file) ||
+      (wantsSearchFiles && allowsFileResource(file, EToolResources.file_search, membership));
+    currentFiles = currentFiles?.filter(needed);
+    deferredProvisionFiles = deferredProvisionFiles.filter(needed);
   }
 
   let endpointFileType: EModelEndpoint | undefined;
@@ -2097,6 +2132,8 @@ export async function initializeAgent(
     adoptLegacySearchEmbeddings: db.adoptLegacySearchEmbeddings,
     hasEntityEmbeddings: db.hasEntityEmbeddings,
     provisionCandidates: deferredProvisionFiles as unknown as TFile[],
+    excludedCodeFileIds,
+    codeSnapshotMounts,
     codeRouteKey: codeExecutionContext.executionRouteKey ?? codeExecutionContext.executionProfile,
     codeBaseUrl: codeExecutionContext.baseUrl,
     codeExecutionProfile: codeExecutionContext.executionProfile,
@@ -2777,7 +2814,14 @@ export async function initializeAgent(
 
   const agentMaxContextNum = Number(agentMaxContextTokens) || DEFAULT_MAX_CONTEXT_TOKENS;
   const maxOutputTokensNum = Number(maxOutputTokens) || 0;
-  const baseContextTokens = Math.max(0, agentMaxContextNum - maxOutputTokensNum);
+  const sharedInputLimit =
+    agent.provider === Providers.GOOGLE || agent.provider === Providers.VERTEXAI
+      ? (getGoogleInputTokenLimit(tokensModel ?? '', maxOutputTokensNum) ?? Infinity)
+      : Infinity;
+  const baseContextTokens = Math.max(
+    0,
+    Math.min(agentMaxContextNum - maxOutputTokensNum, sharedInputLimit),
+  );
 
   const toMongoFiles = (files: Array<TFile | undefined> | undefined): IMongoFile[] =>
     (files ?? []).filter((a): a is TFile => a != null).map((a) => a as unknown as IMongoFile);
@@ -2917,7 +2961,7 @@ export async function initializeAgent(
       provisionWarnings != null && provisionWarnings.length > 0 ? provisionWarnings : undefined,
     maxContextTokens:
       maxContextTokens != null && maxContextTokens > 0
-        ? maxContextTokens
+        ? Math.min(maxContextTokens, sharedInputLimit)
         : Math.max(1024, Math.round(baseContextTokens * (1 - DEFAULT_RESERVE_RATIO))),
     primedCodeFiles,
     codeContextEntries,

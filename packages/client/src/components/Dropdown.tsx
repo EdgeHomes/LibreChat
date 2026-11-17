@@ -192,7 +192,14 @@ const Dropdown: React.FC<DropdownProps> = ({
 
   return (
     <div
-      className={cn('relative max-w-full min-w-0', variant === 'field' && 'w-full', className)}
+      className={cn(
+        'relative max-w-full min-w-0',
+        variant === 'field' && 'w-full',
+        className,
+        /* A caller's `z-50` makes every dropdown its own stacking context at one level, where a
+           later sibling's trigger paints over an earlier one's open list. The open one lifts above. */
+        isOpen && 'z-[60]',
+      )}
       /* An unportaled list is confined to this wrapper's stacking context, where a later
          sibling row with the same z-index would paint over it; lift the wrapper while open. */
       style={isOpen && !isPortaled ? { zIndex: popoverZIndex } : undefined}

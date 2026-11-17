@@ -71,6 +71,8 @@ jest.mock('~/hooks', () => ({
   useElementSize: () => ({ ref: () => {}, width: 800, height: 600 }),
 }));
 jest.mock('~/store', () => ({ __esModule: true, default: { search: 'search-atom' } }));
+/** The row hosts import the whole message renderer; `SearchMessage` is stubbed below. */
+jest.mock('~/components/Chat/Messages/hosts', () => ({}));
 jest.mock('~/components/Chat/Messages/SearchMessage', () => ({
   __esModule: true,
   default: ({ message }: { message: { text: string } }) => (
@@ -120,8 +122,8 @@ describe('Search route', () => {
       'focus-visible:ring-2',
       'focus-visible:ring-ring-primary',
     );
-    expect(container.firstElementChild).toHaveClass('bg-surface-primary-alt');
-    expect(container.querySelector('.bg-gradient-to-t')).toHaveClass('from-surface-primary-alt');
+    expect(container.firstElementChild).toHaveClass('bg-surface-canvas');
+    expect(container.querySelector('.bg-gradient-to-t')).toHaveClass('from-surface-canvas');
   });
 
   it('keeps results mounted while typing (does NOT flash the full spinner)', () => {

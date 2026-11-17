@@ -43,6 +43,7 @@ import DuringRunAction from '../SettingsTabs/Chat/DuringRunAction';
 import DeleteAccount from '../SettingsTabs/Account/DeleteAccount';
 import StatefulWorkspaceDefault from './StatefulWorkspaceDefault';
 import { ForkSettings } from '../SettingsTabs/Chat/ForkSettings';
+import LinksSettings from '~/components/Channels/LinksSettings';
 import ChatDirection from '../SettingsTabs/Chat/ChatDirection';
 import { DeleteCache } from '../SettingsTabs/Data/DeleteCache';
 import { ManageFiles } from '../SettingsTabs/Data/ManageFiles';
@@ -54,6 +55,7 @@ import { TokenCredits, AutoRefill } from './BillingControls';
 import AdminPanel from '../SettingsTabs/General/AdminPanel';
 import SharedLinks from '../SettingsTabs/Data/SharedLinks';
 import ImageResize from '../SettingsTabs/Chat/ImageResize';
+import Workspaces from '~/components/Channels/Workspaces';
 import Passkeys from '../SettingsTabs/Account/Passkeys';
 import { showThinkingAtom } from '~/store/showThinking';
 import ProviderKeys from '../SettingsTabs/ProviderKeys';
@@ -841,6 +843,22 @@ export const registry: SettingEntry[] = [
     Component: Passkeys,
   },
   // Account · Connected accounts
+  {
+    id: 'slackWorkspaces',
+    tab: ACCOUNT,
+    section: 'connections',
+    labelKey: 'com_ui_slack_workspaces_title',
+    keywords: ['slack', 'workspace', 'organization', 'connect', 'disconnect'],
+    Component: Workspaces,
+  },
+  {
+    id: 'channelLinks',
+    tab: ACCOUNT,
+    section: 'connections',
+    labelKey: 'com_ui_channel_link_personal',
+    keywords: ['slack', 'channel', 'identity', 'link', 'revoke'],
+    Component: LinksSettings,
+  },
   {
     id: 'pullRequestAccount',
     tab: ACCOUNT,

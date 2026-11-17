@@ -116,6 +116,8 @@ const GATEWAY_ERROR_MARKER = 'E2E_GATEWAY_ERROR:';
 const BARE_GATEWAY_ERROR_MARKER = 'E2E_BARE_GATEWAY_ERROR:';
 const GATEWAY_ERROR_STATUS = { MODEL_RATE_LIMIT: 429, MODEL_NOT_FOUND: 404 };
 const MARKDOWN_REPLY_MARKER = 'E2E_MARKDOWN_REPLY';
+/** Display and inline math, so a spec can tell KaTeX rendered (it loads on first need). */
+const MATH_REPLY_MARKER = 'E2E_MATH_REPLY';
 const STREAMING_MARKDOWN_REPLY_MARKER = 'E2E_STREAMING_MARKDOWN_REPLY';
 const HIGHLIGHT_CODE_MARKER = 'E2E_HIGHLIGHT_CODE:';
 const STATEFUL_CODE_MARKER = 'E2E_STATEFUL_CODE:';
@@ -375,13 +377,26 @@ function collectToolNames(agents) {
   return new Set(collectToolDefinitions(agents).keys());
 }
 
+/**
+ * A subagent model override hands one graph's model to its children, so a child's stream
+ * arrives holding the parent graph. A foreground child runs under the parent's run id and
+ * ends inside the parent run. A detached child runs under its own id and outlives it: the
+ * parent's agent context is not the child's prompt, and the host drops it once the parent
+ * settles, so a view built from it would change with whichever of the two finished first.
+ */
+function ownsStream(graph, options, runManager) {
+  const runId = runManager?.metadata?.run_id ?? options?.metadata?.run_id;
+  return typeof runId !== 'string' || typeof graph?.runId !== 'string' || runId === graph.runId;
+}
+
 async function getStreamAgentView({ graph, messages, options, runManager }) {
   let agentId = runManager?.metadata?.agentId ?? options?.metadata?.agentId;
   let agentContext;
+  const agentContexts = ownsStream(graph, options, runManager) ? graph?.agentContexts : undefined;
   if (typeof agentId === 'string') {
-    agentContext = graph?.agentContexts?.get(agentId);
-  } else if (graph?.agentContexts?.size === 1) {
-    [agentId, agentContext] = graph.agentContexts.entries().next().value;
+    agentContext = agentContexts?.get(agentId);
+  } else if (agentContexts?.size === 1) {
+    [agentId, agentContext] = agentContexts.entries().next().value;
   }
   /**
    * Graph.attemptInvoke intentionally sends test override models the pruned
@@ -542,6 +557,8 @@ function llmConfigReportResponses(graph) {
     model: clientOptions.model ?? clientOptions.modelName ?? null,
     sampling,
     reasoningEffort: modelKwargs.reasoning_effort ?? null,
+    thinkingLevel: clientOptions.thinkingConfig?.thinkingLevel ?? null,
+    maxOutputTokens: clientOptions.maxOutputTokens ?? null,
     maxContextTokens: agent?.maxContextTokens ?? null,
   };
   return { responses: [`E2E llm config: ${JSON.stringify(report)}`] };
@@ -709,6 +726,13 @@ function replyResponses(text) {
     };
   }
 
+  if (text.includes(MATH_REPLY_MARKER)) {
+    return {
+      responses: [
+        ['E2E math reply:', '', '$$E = mc^2$$', '', 'Water is \\(\\ce{H2O}\\).'].join('\n'),
+      ],
+    };
+  }
   if (text.includes(MARKDOWN_REPLY_MARKER)) {
     return {
       responses: [

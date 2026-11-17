@@ -106,7 +106,7 @@ const {
   digestFile,
 } = require('~/server/services/Files/provision');
 const { createProvisionFilesCallback } = require('~/server/services/Files/provisionCallback');
-const { getModelsConfig } = require('~/server/controllers/ModelController');
+const { getEndpointModelsConfig } = require('~/server/controllers/ModelController');
 const { checkPermission, findAccessibleResources } = require('~/server/services/PermissionService');
 const AgentClient = require('~/server/controllers/agents/client');
 const { processAddedConvo } = require('./addedConvo');
@@ -265,17 +265,7 @@ const initializeClientWithProvider = async ({
 
   /** @type {Array<UsageMetadata>} */
   const collectedUsage = [];
-  /**
-   * Vertex Gemini 3 thought signatures captured from `chat_model_end` events,
-   * keyed by `tool_call_id`. Persisted on
-   * `responseMessage.metadata.thoughtSignatures` so subsequent conversation
-   * turns can restore each signature onto the right reconstructed AIMessage's
-   * `additional_kwargs.signatures` and avoid 400s when resuming after a tool
-   * round-trip without a final text reply. Always allocated; capture path
-   * is a no-op for providers that don't emit signatures (OpenAI, Anthropic,
-   * Bedrock, etc.).
-   * @type {Record<string, string>}
-   */
+  /** @type {import('@librechat/api').GoogleThoughtSignatures} */
   const collectedThoughtSignatures = {};
   /** @type {ArtifactPromises} */
   const artifactPromises = [];
@@ -376,9 +366,10 @@ const initializeClientWithProvider = async ({
     }),
   );
   const primaryAgentPromise = endpointOption.agent;
-  const modelsConfigPromise = getModelsConfig(req);
-  const validatedPrimaryAgentPromise = Promise.all([primaryAgentPromise, modelsConfigPromise]).then(
-    async ([primaryAgent, modelsConfig]) => {
+  /** Each validation, including handoff and subagents, loads only its agent's provider models. */
+  const getEndpointModels = (endpoint) => getEndpointModelsConfig(req, endpoint);
+  const validatedPrimaryAgentPromise = Promise.resolve(primaryAgentPromise).then(
+    async (primaryAgent) => {
       if (!primaryAgent) {
         throw new Error('Agent not found');
       }
@@ -386,7 +377,7 @@ const initializeClientWithProvider = async ({
       const validationResult = await validateAgentModel({
         req,
         res,
-        modelsConfig,
+        getEndpointModels,
         logViolation,
         agent: primaryAgent,
       });
@@ -394,7 +385,7 @@ const initializeClientWithProvider = async ({
         throw new Error(validationResult.error?.message);
       }
 
-      return { primaryAgent, modelsConfig };
+      return primaryAgent;
     },
   );
 
@@ -662,7 +653,7 @@ const initializeClientWithProvider = async ({
     editableSkillIds,
     skillCreateAllowed,
     { skillStates, defaultActiveOnShare },
-    { primaryAgent, modelsConfig },
+    primaryAgent,
     requestConversation,
     chatProjectContext,
     toolRoleGrants,
@@ -884,7 +875,7 @@ const initializeClientWithProvider = async ({
       agent_ids: primaryConfig.agent_ids,
       endpointOption,
       allowedProviders,
-      modelsConfig,
+      getEndpointModels,
       loadTools,
       requestFiles,
       conversationId,
@@ -985,7 +976,7 @@ const initializeClientWithProvider = async ({
     res,
     loadTools,
     logViolation,
-    modelsConfig,
+    getEndpointModels,
     requestFiles,
     agentConfigs,
     primaryAgent,
@@ -1391,7 +1382,7 @@ const initializeClientWithProvider = async ({
       throw new Error(`You no longer have access to subagent ${agentId}.`);
     }
     const validation = await waitForAbort(
-      validateAgentModel({ req, res, agent, modelsConfig, logViolation }),
+      validateAgentModel({ req, res, agent, getEndpointModels, logViolation }),
       context.signal,
     );
     throwIfAborted(context.signal);

@@ -97,7 +97,7 @@ describe('MCP Tool Authorization', () => {
 
   afterAll(async () => {
     await mongoose.disconnect();
-    await mongoServer.stop();
+    await mongoServer?.stop();
   });
 
   beforeEach(async () => {
@@ -821,6 +821,41 @@ describe('MCP Tool Authorization', () => {
       const agentInDb = await Agent.findOne({ id: existingAgentId });
       expect(agentInDb.mcpServerNames).toEqual([`Google${d}Workspace`]);
       expect(agentInDb.mcpServerNames).not.toContain('Workspace');
+    });
+
+    test.each([true, false])(
+      'does not grant an unindexed Action key with MCP permission: %s',
+      async (canUse) => {
+        const tools = ['lookup_action_x_mcp_pay'];
+        await Agent.updateOne({ id: existingAgentId }, { tools, mcpServerNames: [] });
+        mockReq.user.id = canUse
+          ? existingAgentAuthorId.toString()
+          : new mongoose.Types.ObjectId().toString();
+        mockUserCanUseMCPServers.mockResolvedValue(canUse);
+        mockReq.params.id = existingAgentId;
+        mockReq.body = { tools };
+        await updateAgentHandler(mockReq, mockRes);
+        expect((await Agent.findOne({ id: existingAgentId })).mcpServerNames).toEqual([]);
+      },
+    );
+
+    test('rejects grants revoked after controller authorization', async () => {
+      const db = require('~/models');
+      mockReq.user.id = existingAgentAuthorId.toString();
+      mockReq.params.id = existingAgentId;
+      mockReq.body = { tools: ['existingTool_mcp_authorizedServer'] };
+      const update = db.updateAgent;
+      const spy = jest.spyOn(db, 'updateAgent').mockImplementationOnce(async (...args) => {
+        await Agent.updateOne({ id: existingAgentId }, { tools: [], mcpServerNames: [] });
+        return update(...args);
+      });
+      try {
+        await updateAgentHandler(mockReq, mockRes);
+        expect(mockRes.status).toHaveBeenCalledWith(409);
+        expect((await Agent.findOne({ id: existingAgentId })).mcpServerNames).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('should let persistence derive when an unindexed agent retains MCP tools', async () => {
