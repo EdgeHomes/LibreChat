@@ -2096,6 +2096,25 @@ describe('formatToolContent: downloadable MCP files', () => {
     expect(text).not.toContain('%PDF');
   });
 
+  it('attaches the file for custom-endpoint providers on the string path', () => {
+    const [text, artifacts] = formatToolContent(
+      {
+        content: [
+          {
+            type: 'resource',
+            resource: { uri: 'file:///Lot%20release.pdf', mimeType: 'application/pdf', blob: pdf },
+          },
+        ],
+      } as t.MCPToolCallResponse,
+      'litellm' as t.Provider,
+    );
+    expect(artifacts?.mcp_files).toEqual([
+      { filename: 'Lot release.pdf', mimeType: 'application/pdf', data: pdf },
+    ]);
+    expect(text).toContain('File attached for the user to download: Lot release.pdf');
+    expect(text).not.toContain('%PDF');
+  });
+
   it('keeps directory parts out of the file name', () => {
     const [, artifacts] = formatToolContent(
       {

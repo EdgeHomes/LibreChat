@@ -297,7 +297,8 @@ function describeResourceLink(item: t.ResourceLink): string[] {
   return lines;
 }
 
-function parseAsString(result: t.MCPToolCallResponse): string {
+/** `files` collects downloadable documents so providers on the string path still get attachments. */
+function parseAsString(result: t.MCPToolCallResponse, files?: t.McpFileArtifact[]): string {
   const content = result?.content ?? [];
   if (!content.length) {
     return '(No response)';
@@ -314,7 +315,14 @@ function parseAsString(result: t.MCPToolCallResponse): string {
       if (item.type === 'resource') {
         const resourceText = [];
         // A ui:// HTML body is a whole document meant for the sandbox, never model context.
-        if (!isRenderableUiResource(item)) {
+        const downloadable =
+          files && !isRenderableUiResource(item) ? readDownloadableFile(item.resource) : null;
+        if (downloadable) {
+          files?.push(downloadable);
+          resourceText.push(
+            `File attached for the user to download: ${flattenMetadata(downloadable.filename)}`,
+          );
+        } else if (!isRenderableUiResource(item)) {
           const body = readResourceBody(item.resource);
           if (body.text) {
             resourceText.push(body.text);
@@ -400,7 +408,9 @@ export function formatToolContent(
   );
   const hasUiResource = result?.content?.some((item) => isUiResource(item));
   if (!isRecognizedProvider && !hasSyntheticApp && !hasUiResource) {
-    return [parseAsString(result), undefined];
+    const stringFiles: t.McpFileArtifact[] = [];
+    const text = parseAsString(result, stringFiles);
+    return [text, stringFiles.length ? { mcp_files: stringFiles } : undefined];
   }
 
   const content = result?.content ?? [];
@@ -413,7 +423,7 @@ export function formatToolContent(
   const files: t.McpFileArtifact[] = [];
   let placementMarkerCount = 0;
   // Assistants submits only this string; keep its bounded conversion independent from host UI data.
-  let currentTextBlock = isRecognizedProvider ? '' : parseAsString(result);
+  let currentTextBlock = isRecognizedProvider ? '' : parseAsString(result, files);
 
   type ContentHandler = undefined | ((item: t.ToolContentPart) => void);
 
